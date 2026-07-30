@@ -47,6 +47,25 @@ Exactly what the official Soda CI build uses, plus the patch set:
 The patches are applied as **wine-tkg user patches** (`wine-tkg-userpatches/*.mypatch`),
 the same mechanism the official recipe reserves for this.
 
+## Provenance (pinned versions this adaptation was made and verified against)
+
+Upstream recipes and wine-tkg are moving targets fetched from `main`/HEAD at build
+time; these are the exact commits used:
+
+| Component | Pin |
+|---|---|
+| Patch series | [giang17/wine](https://github.com/giang17/wine) branch `d2d1-dcomp-11.0` @ `aa0abd18c084b2a0e78c70a8ba30389f49051a01` (213 commits on Wine 11.0) |
+| Wine source | [ValveSoftware/wine](https://github.com/ValveSoftware/wine) tag `experimental-wine-bleeding-edge-10.0-272530-20251119-p75f008-w4a5ca6-d392494-vc01c8b` = commit `4a5ca68194812d06d4d6faf8b7ea8d6aa76f50ea` |
+| Soda recipe | [bottlesdevs/build-tools](https://github.com/bottlesdevs/build-tools) `runners/vaniglia/wine-tkg-valve.cfg` @ `ece9379d32c558a7ac75ee112caa4329a2a96c20` (repo HEAD then: `e047e02d51e8859bc698d54d6c5f109f2425271a`) |
+| wine-tkg-git | [Frogging-Family/wine-tkg-git](https://github.com/Frogging-Family/wine-tkg-git) @ `6e1c41342a249e0029c1f35f36775e1caa5ce1d1` (2026-07-13) |
+| Newest upstream Soda release (reference) | [bottlesdevs/wine](https://github.com/bottlesdevs/wine) tag `soda-9.0-1` @ `1bd3662c0fa6ab0e58af18a5192ce69374a1f108` — note this 2024 release is actually built from a wine-9.0 bleeding tag; the recipe pin above is what a current rebuild uses |
+
+For bit-exact reproducibility, check out these commits instead of `main`/HEAD in
+`build.sh` / the workflow (both intentionally track upstream like the official build).
+Note: the recipe's own `_bleeding_tag` value lacks the `experimental-` prefix and is
+reset by the tkg profile load order, so `build.sh` pins the full tag in the tkg profile
+file directly (see comments in `build.sh`).
+
 ## Build
 
 ### Locally (Debian/Ubuntu-ish hosts)
