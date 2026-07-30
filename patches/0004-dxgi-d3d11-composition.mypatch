@@ -1395,7 +1395,7 @@ index e828ed0d..6f911266 100644
  
  static HRESULT STDMETHODCALLTYPE dxgi_output_TakeOwnership(IDXGIOutput6 *iface, IUnknown *device, BOOL exclusive)
 diff --git a/dlls/dxgi/resource.c b/dlls/dxgi/resource.c
-index 0a2fa097..f67ccde3 100644
+index 0a2fa097..7cd7439a 100644
 --- a/dlls/dxgi/resource.c
 +++ b/dlls/dxgi/resource.c
 @@ -220,6 +220,96 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_GetDC(IDXGISurface1 *iface, BOOL d
@@ -1495,7 +1495,7 @@ index 0a2fa097..f67ccde3 100644
  static HRESULT STDMETHODCALLTYPE dxgi_surface_ReleaseDC(IDXGISurface1 *iface, RECT *dirty_rect)
  {
      struct dxgi_resource *resource = impl_from_IDXGISurface1(iface);
-@@ -227,7 +317,35 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_ReleaseDC(IDXGISurface1 *iface, RE
+@@ -227,7 +317,34 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_ReleaseDC(IDXGISurface1 *iface, RE
  
      TRACE("iface %p, rect %s\n", iface, wine_dbgstr_rect(dirty_rect));
  
@@ -1515,8 +1515,7 @@ index 0a2fa097..f67ccde3 100644
 +
 +        if (!swapchain)
 +        {
-+            wined3d_resource_get_sub_resource_desc(resource->wined3d_resource,
-+                    resource->subresource_idx, &desc);
++            wined3d_texture_get_sub_resource_desc(texture, 0, &desc);
 +            wined3d_mutex_unlock();
 +
 +            if (desc.width > 1 && desc.height > 1)
