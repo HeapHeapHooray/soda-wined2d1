@@ -13,6 +13,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the release tag + upload the runner asset
 
     steps:
       - uses: actions/checkout@v4
@@ -65,11 +67,10 @@ jobs:
           mv $PKG_BASENAME-$WINE_VERSION-$REVISION-x86_64.tar.xz /tmp/$PKG_BASENAME-$WINE_VERSION-$REVISION-x86_64.tar.xz
 
       - name: release
-        uses: "marvinpinto/action-automatic-releases@latest"
+        uses: "softprops/action-gh-release@v2"
         with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          tag_name: "${{ env.PKG_BASENAME }}-${{ env.WINE_VERSION }}-${{ env.REVISION }}"
+          name: "Soda-d2d1 ${{ env.WINE_VERSION }}-${{ env.REVISION }}"
           draft: false
           prerelease: false
-          automatic_release_tag: "${{ env.PKG_BASENAME }}-${{ env.WINE_VERSION }}-${{ env.REVISION }}"
-          title: "Soda-d2d1 ${{ env.WINE_VERSION }}-${{ env.REVISION }}"
           files: "/tmp/${{ env.PKG_BASENAME }}-${{ env.WINE_VERSION }}-${{ env.REVISION }}-x86_64.tar.xz"
