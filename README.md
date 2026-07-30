@@ -125,5 +125,7 @@ your plugin host/DAW.
 - Runner recipe/build: [bottlesdevs](https://github.com/bottlesdevs),
   [Frogging-Family/wine-tkg-git](https://github.com/Frogging-Family/wine-tkg-git),
   [ValveSoftware/wine](https://github.com/ValveSoftware/wine)
+- Backport of the patch series to the Soda base, patch split, and build tooling:
+  **Kimi K3** (Moonshot AI)
 
 License: LGPL-2.1-or-later, same as Wine.
