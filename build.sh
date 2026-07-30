@@ -14,7 +14,7 @@
 # =============================================================================
 set -euo pipefail
 
-RUNNER_NAME="soda-d2d1-10.0-1"
+PKG_BASENAME="soda-d2d1-10.0-1"
 # The wine source: Valve's Proton wine bleeding-edge tag pinned by the
 # bottlesdevs soda recipe (build-tools: runners/vaniglia/wine-tkg-valve.cfg).
 BLEEDING_TAG="experimental-wine-bleeding-edge-10.0-272530-20251119-p75f008-w4a5ca6-d392494-vc01c8b"
@@ -64,10 +64,10 @@ yes | ./non-makepkg-build.sh
 
 # --- 8. Package like the official workflow -----------------------------------
 cd non-makepkg-builds
-mv wine-tkg-* "${RUNNER_NAME}-x86_64"
-tar cJvf "$REPO_ROOT/dist/${RUNNER_NAME}-x86_64.tar.xz" "${RUNNER_NAME}-x86_64"
+mv wine-tkg-* "${PKG_BASENAME}-x86_64"
+tar cJvf "$REPO_ROOT/dist/${PKG_BASENAME}-x86_64.tar.xz" "${PKG_BASENAME}-x86_64"
 
 echo
-echo "Done: dist/${RUNNER_NAME}-x86_64.tar.xz"
-echo "Install:  tar -xJf dist/${RUNNER_NAME}-x86_64.tar.xz -C ~/.local/share/bottles/runners/"
-echo "Then select '$RUNNER_NAME' as the runner in Bottles."
+echo "Done: dist/${PKG_BASENAME}-x86_64.tar.xz"
+echo "Install:  tar -xJf dist/${PKG_BASENAME}-x86_64.tar.xz -C ~/.local/share/bottles/runners/"
+echo "Then select '$PKG_BASENAME' as the runner in Bottles."

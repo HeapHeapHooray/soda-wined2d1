@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 env:
   WINE_VERSION: '10.0'
-  RUNNER_NAME: 'soda-d2d1'
+  PKG_BASENAME: 'soda-d2d1'
   REVISION: '1'
   BLEEDING_TAG: 'experimental-wine-bleeding-edge-10.0-272530-20251119-p75f008-w4a5ca6-d392494-vc01c8b'
 jobs:
@@ -60,9 +60,9 @@ jobs:
       - name: package
         working-directory: /home/runner/work/wine-tkg-git/wine-tkg-git/non-makepkg-builds/
         run: |
-          mv wine-tkg-* $RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64
-          tar cJvf $RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64.tar.xz $RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64
-          mv $RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64.tar.xz /tmp/$RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64.tar.xz
+          mv wine-tkg-* $PKG_BASENAME-$WINE_VERSION-$REVISION-x86_64
+          tar cJvf $PKG_BASENAME-$WINE_VERSION-$REVISION-x86_64.tar.xz $PKG_BASENAME-$WINE_VERSION-$REVISION-x86_64
+          mv $PKG_BASENAME-$WINE_VERSION-$REVISION-x86_64.tar.xz /tmp/$PKG_BASENAME-$WINE_VERSION-$REVISION-x86_64.tar.xz
 
       - name: release
         uses: "marvinpinto/action-automatic-releases@latest"
@@ -70,6 +70,6 @@ jobs:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
           draft: false
           prerelease: false
-          automatic_release_tag: "${{ env.RUNNER_NAME }}-${{ env.WINE_VERSION }}-${{ env.REVISION }}"
+          automatic_release_tag: "${{ env.PKG_BASENAME }}-${{ env.WINE_VERSION }}-${{ env.REVISION }}"
           title: "Soda-d2d1 ${{ env.WINE_VERSION }}-${{ env.REVISION }}"
-          files: "/tmp/${{ env.RUNNER_NAME }}-${{ env.WINE_VERSION }}-${{ env.REVISION }}-x86_64.tar.xz"
+          files: "/tmp/${{ env.PKG_BASENAME }}-${{ env.WINE_VERSION }}-${{ env.REVISION }}-x86_64.tar.xz"
