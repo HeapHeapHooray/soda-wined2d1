@@ -1,8 +1,16 @@
 diff --git a/dlls/dwrite/analyzer.c b/dlls/dwrite/analyzer.c
-index c25f4484..071fd5f5 100644
+index c25f4484..35ec665a 100644
 --- a/dlls/dwrite/analyzer.c
 +++ b/dlls/dwrite/analyzer.c
-@@ -295,6 +295,9 @@ system_fallback_config[] =
+@@ -22,6 +22,7 @@
+ #define COBJMACROS
+ 
+ #include <math.h>
++#include <stdbool.h>
+ 
+ #include "dwrite_private.h"
+ #include "scripts.h"
+@@ -295,6 +296,9 @@ system_fallback_config[] =
      { "1C00-1C4F",              L"Noto Sans Lepcha" },
      { "1C50-1C7F",              L"Noto Sans Ol Chiki" },
  
@@ -12,7 +20,7 @@ index c25f4484..071fd5f5 100644
      { "2C80-2CFF",              L"Noto Sans Coptic" },
      { "2D30-2D7F",              L"Noto Sans Tifinagh" },
  
-@@ -410,6 +413,12 @@ static void text_source_get_u32_char(struct text_source_context *context)
+@@ -410,6 +414,12 @@ static void text_source_get_u32_char(struct text_source_context *context)
      available = context->chunk_length - context->cursor;
      text = context->text + context->cursor;
  
@@ -25,7 +33,7 @@ index c25f4484..071fd5f5 100644
      if (available > 1 && IS_HIGH_SURROGATE(*text) && IS_LOW_SURROGATE(*(text + 1)))
      {
          context->cursor += 2;
-@@ -418,6 +427,11 @@ static void text_source_get_u32_char(struct text_source_context *context)
+@@ -418,6 +428,11 @@ static void text_source_get_u32_char(struct text_source_context *context)
          return;
      }
  
@@ -37,7 +45,7 @@ index c25f4484..071fd5f5 100644
      context->cursor++;
      context->consumed++;
      context->ch = *text;
-@@ -517,14 +531,14 @@ static HRESULT fallback_locale_add_mapping(struct fallback_locale *locale, size_
+@@ -517,14 +532,14 @@ static HRESULT fallback_locale_add_mapping(struct fallback_locale *locale, size_
  
  /* TODO: potentially needs improvement to consider partially matching locale names. */
  static struct fallback_locale * font_fallback_get_locale(const struct list *locales,
@@ -54,7 +62,7 @@ index c25f4484..071fd5f5 100644
      }
  
      return neutral;
-@@ -617,7 +631,7 @@ static const struct fallback_mapping * find_fallback_mapping(const struct fallba
+@@ -617,7 +632,7 @@ static const struct fallback_mapping * find_fallback_mapping(const struct fallba
      /* Mapping wasn't found for specific locale, try with neutral one. This will only recurse once. */
      if (*locale->name)
      {
@@ -63,7 +71,7 @@ index c25f4484..071fd5f5 100644
          mapping = find_fallback_mapping(fallback, locale, ch);
      }
  
-@@ -2432,7 +2446,7 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
+@@ -2432,7 +2447,7 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
      if (!locale_name) locale_name = L"";
  
      /* Lookup locale entry once, if specific locale is missing neutral one will be returned. */
@@ -72,7 +80,7 @@ index c25f4484..071fd5f5 100644
  
      if (FAILED(hr = text_source_context_init(&context, source, position, length))) return hr;
  
-@@ -2460,14 +2474,13 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
+@@ -2460,14 +2475,13 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
          if (SUCCEEDED(create_matching_font(mapping->collection ? mapping->collection : fallback->systemcollection,
                  mapping->families[i], weight, style, stretch, &IID_IDWriteFont3, (void **)&font)))
          {
@@ -88,7 +96,7 @@ index c25f4484..071fd5f5 100644
              *scale = mapping->scale;
  
              return S_OK;
-@@ -2671,7 +2684,7 @@ static struct fallback_locale * fallback_builder_add_locale(struct dwrite_fontfa
+@@ -2671,7 +2685,7 @@ static struct fallback_locale * fallback_builder_add_locale(struct dwrite_fontfa
      struct fallback_locale *locale;
  
      if (!locale_name) locale_name = L"";
@@ -156,7 +164,7 @@ index b200ce58..c85c7420 100644
  #define MS_GPOS_TAG DWRITE_MAKE_OPENTYPE_TAG('G','P','O','S')
  
 diff --git a/dlls/dwrite/font.c b/dlls/dwrite/font.c
-index b3424423..4e3c19a9 100644
+index b3424423..9a0d807e 100644
 --- a/dlls/dwrite/font.c
 +++ b/dlls/dwrite/font.c
 @@ -6415,11 +6415,19 @@ HRESULT create_glyphrunanalysis(const struct glyphrunanalysis_desc *desc, IDWrit
@@ -234,7 +242,7 @@ index b3424423..4e3c19a9 100644
 +        entries = NULL;
 +    }
 +
-+    init_fontset(object, set->factory, entries, matched_count, FALSE);
++    init_fontset(object, set->factory, entries, matched_count);
 +
 +    *fontset = (IDWriteFontSet *)&object->IDWriteFontSet3_iface;
 +
