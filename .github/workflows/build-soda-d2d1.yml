@@ -1,0 +1,75 @@
+name: build-soda-d2d1
+on:
+  push:
+    branches:
+      - 'master'
+      - 'main'
+  workflow_dispatch:
+env:
+  WINE_VERSION: '10.0'
+  RUNNER_NAME: 'soda-d2d1'
+  REVISION: '1'
+  BLEEDING_TAG: 'experimental-wine-bleeding-edge-10.0-272530-20251119-p75f008-w4a5ca6-d392494-vc01c8b'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup
+        working-directory: /home/runner/work/
+        run: |
+          mkdir -p /home/runner/.config/frogminer/
+          sudo apt purge -y ubuntu-advantage-tools python3-update-manager
+          sudo dpkg --add-architecture i386 && sudo apt update
+          sudo apt install aptitude
+          sudo aptitude remove -y '?narrow(?installed,?version(deb.sury.org))'
+
+      - name: clone wine-tkg-git repo
+        working-directory: /home/runner/work/
+        run: |
+          git clone https://github.com/Frogging-Family/wine-tkg-git.git
+          cd wine-tkg-git/wine-tkg-git
+          sed -i "s/_LOCAL_PRESET=\"\"/_LOCAL_PRESET=\"valve-exp-bleeding\"/g" customization.cfg
+
+      - name: pin the wine tag in the tkg profile
+        working-directory: /home/runner/work/wine-tkg-git/wine-tkg-git
+        run: |
+          # The valve-exp-bleeding profile is sourced after the external recipe
+          # and would reset _bleeding_tag to "", so pin it in the profile itself.
+          PROFILE="wine-tkg-profiles/wine-tkg-valve-exp-bleeding.cfg"
+          sed -i "s|_bleeding_tag=\".*\"|_bleeding_tag=\"$BLEEDING_TAG\"|" "$PROFILE"
+          sed -i 's|experimental_11.0|experimental_10.0|g' "$PROFILE"
+          # de-steamify-10.0 currently fails 2 hunks against this bleeding tag
+          # (unrelated to the d2d1 series); it only strips Steam integration,
+          # which is harmless to keep under Bottles.
+          rm -f wine-tkg-patches/hotfixes/valve/de-steamify/10.0/de-steamify-valve-exp-bleeding.mypatch
+
+      - name: get/set the soda recipe
+        working-directory: /home/runner/.config/frogminer/
+        run: curl https://raw.githubusercontent.com/bottlesdevs/build-tools/main/runners/vaniglia/wine-tkg-valve.cfg > wine-tkg.cfg
+
+      - name: install the d2d1-dcomp patch set as wine-tkg user patches
+        run: cp patches/*.mypatch /home/runner/work/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches/
+
+      - name: start build
+        working-directory: /home/runner/work/wine-tkg-git/wine-tkg-git/
+        run: yes|./non-makepkg-build.sh
+
+      - name: package
+        working-directory: /home/runner/work/wine-tkg-git/wine-tkg-git/non-makepkg-builds/
+        run: |
+          mv wine-tkg-* $RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64
+          tar cJvf $RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64.tar.xz $RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64
+          mv $RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64.tar.xz /tmp/$RUNNER_NAME-$WINE_VERSION-$REVISION-x86_64.tar.xz
+
+      - name: release
+        uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          draft: false
+          prerelease: false
+          automatic_release_tag: "${{ env.RUNNER_NAME }}-${{ env.WINE_VERSION }}-${{ env.REVISION }}"
+          title: "Soda-d2d1 ${{ env.WINE_VERSION }}-${{ env.REVISION }}"
+          files: "/tmp/${{ env.RUNNER_NAME }}-${{ env.WINE_VERSION }}-${{ env.REVISION }}-x86_64.tar.xz"

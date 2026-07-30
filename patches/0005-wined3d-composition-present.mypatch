@@ -1,0 +1,2012 @@
+diff --git a/dlls/d3d8/device.c b/dlls/d3d8/device.c
+index b5bf3707..036c60ed 100644
+--- a/dlls/d3d8/device.c
++++ b/dlls/d3d8/device.c
+@@ -1985,7 +1985,7 @@ static void resolve_depth_buffer(struct d3d8_device *device)
+     d3d8_dsv = wined3d_rendertarget_view_get_sub_resource_parent(wined3d_dsv);
+ 
+     wined3d_device_context_resolve_sub_resource(device->immediate_context, dst_resource, 0,
+-            wined3d_rendertarget_view_get_resource(wined3d_dsv), d3d8_dsv->sub_resource_idx, desc.format);
++            wined3d_rendertarget_view_get_resource(wined3d_dsv), d3d8_dsv->sub_resource_idx, 0, desc.format);
+ }
+ 
+ static HRESULT WINAPI d3d8_device_SetRenderState(IDirect3DDevice8 *iface,
+diff --git a/dlls/d3d8/tests/device.c b/dlls/d3d8/tests/device.c
+index 7d638d2a..d1fd3bb3 100644
+--- a/dlls/d3d8/tests/device.c
++++ b/dlls/d3d8/tests/device.c
+@@ -2094,11 +2094,7 @@ static void test_reset(void)
+ 
+     hr = IDirect3D8_CreateDevice(d3d8, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL,
+             window, D3DCREATE_SOFTWARE_VERTEXPROCESSING, &d3dpp, &device2);
+-    if (FAILED(hr))
+-    {
+-        skip("Failed to create device, hr %#lx.\n", hr);
+-        goto cleanup;
+-    }
++    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+ 
+     hr = IDirect3DDevice8_TestCooperativeLevel(device2);
+     ok(SUCCEEDED(hr), "TestCooperativeLevel failed, hr %#lx.\n", hr);
+@@ -2113,14 +2109,11 @@ static void test_reset(void)
+ 
+     hr = IDirect3DDevice8_Reset(device2, &d3dpp);
+     ok(SUCCEEDED(hr), "Reset failed, hr %#lx.\n", hr);
+-    if (FAILED(hr))
+-        goto cleanup;
+ 
+     hr = IDirect3DDevice8_GetDepthStencilSurface(device2, &surface);
+     ok(SUCCEEDED(hr), "GetDepthStencilSurface failed, hr %#lx.\n", hr);
+     ok(!!surface, "Depth / stencil buffer should not be NULL.\n");
+-    if (surface)
+-        IDirect3DSurface8_Release(surface);
++    IDirect3DSurface8_Release(surface);
+ 
+ cleanup:
+     free(modes);
+diff --git a/dlls/d3d9/device.c b/dlls/d3d9/device.c
+index 3ba5764a..dfd5b6aa 100644
+--- a/dlls/d3d9/device.c
++++ b/dlls/d3d9/device.c
+@@ -2541,7 +2541,7 @@ static void resolve_depth_buffer(struct d3d9_device *device)
+     d3d9_dsv = wined3d_rendertarget_view_get_sub_resource_parent(wined3d_dsv);
+ 
+     wined3d_device_context_resolve_sub_resource(device->immediate_context, dst_resource, 0,
+-            wined3d_rendertarget_view_get_resource(wined3d_dsv), d3d9_dsv->sub_resource_idx, desc.format);
++            wined3d_rendertarget_view_get_resource(wined3d_dsv), d3d9_dsv->sub_resource_idx, 0, desc.format);
+ }
+ 
+ static HRESULT WINAPI DECLSPEC_HOTPATCH d3d9_device_SetRenderState(IDirect3DDevice9Ex *iface,
+diff --git a/dlls/d3d9/tests/device.c b/dlls/d3d9/tests/device.c
+index df9d7c54..734de2d9 100644
+--- a/dlls/d3d9/tests/device.c
++++ b/dlls/d3d9/tests/device.c
+@@ -2536,12 +2536,9 @@ static void test_reset(void)
+     d3dpp.EnableAutoDepthStencil = FALSE;
+     d3dpp.AutoDepthStencilFormat = D3DFMT_D24S8;
+ 
+-    if (FAILED(hr = IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL,
+-            hwnd, D3DCREATE_SOFTWARE_VERTEXPROCESSING, &d3dpp, &device2)))
+-    {
+-        skip("Failed to create device, hr %#lx.\n", hr);
+-        goto cleanup;
+-    }
++    hr = IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL,
++            hwnd, D3DCREATE_SOFTWARE_VERTEXPROCESSING, &d3dpp, &device2);
++    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+ 
+     hr = IDirect3DDevice9_TestCooperativeLevel(device2);
+     ok(hr == S_OK, "Got hr %#lx.\n", hr);
+@@ -2556,12 +2553,10 @@ static void test_reset(void)
+     hr = IDirect3DDevice9_Reset(device2, &d3dpp);
+     ok(hr == S_OK, "Got hr %#lx.\n", hr);
+ 
+-    if (FAILED(hr)) goto cleanup;
+-
+     hr = IDirect3DDevice9_GetDepthStencilSurface(device2, &surface);
+     ok(hr == S_OK, "Got hr %#lx.\n", hr);
+     ok(surface != NULL, "Depth stencil should not be NULL\n");
+-    if (surface) IDirect3DSurface9_Release(surface);
++    IDirect3DSurface9_Release(surface);
+ 
+ cleanup:
+     free(modes);
+diff --git a/dlls/wined3d/adapter_gl.c b/dlls/wined3d/adapter_gl.c
+index 1bbafc79..effd36fd 100644
+--- a/dlls/wined3d/adapter_gl.c
++++ b/dlls/wined3d/adapter_gl.c
+@@ -1299,6 +1299,7 @@ cards_nvidia_binary[] =
+     /* Direct 3D 11 */
+     {"Tesla T4",                    CARD_NVIDIA_TESLA_T4},
+     {"Ampere A10",                  CARD_NVIDIA_AMPERE_A10},
++    {"NVIDIA A10G",                 CARD_NVIDIA_AMPERE_A10G},
+     {"RTX 3080",                    CARD_NVIDIA_GEFORCE_RTX3080},   /* GeForce 3000 - highend */
+     {"RTX 3070",                    CARD_NVIDIA_GEFORCE_RTX3070},   /* GeForce 3000 - highend */
+     {"RTX 2080 Ti",                 CARD_NVIDIA_GEFORCE_RTX2080TI}, /* GeForce 2000 - highend */
+@@ -3949,7 +3950,6 @@ static void wined3d_adapter_init_fb_cfgs(struct wined3d_adapter_gl *adapter_gl,
+             if (!GL_EXTCALL(wglGetPixelFormatAttribivARB(dc, format_id, 0, attrib_count, attribs, values)))
+                 continue;
+ 
+-            cfg->iPixelFormat = format_id;
+             cfg->redSize = values[0];
+             cfg->greenSize = values[1];
+             cfg->blueSize = values[2];
+@@ -3982,7 +3982,7 @@ static void wined3d_adapter_init_fb_cfgs(struct wined3d_adapter_gl *adapter_gl,
+ 
+             TRACE("iPixelFormat=%d, iPixelType=%#x, doubleBuffer=%d, RGBA=%d/%d/%d/%d, "
+                     "depth=%d, stencil=%d, samples=%d, windowDrawable=%d\n",
+-                    cfg->iPixelFormat, cfg->iPixelType, cfg->doubleBuffer,
++                    format_id, cfg->iPixelType, cfg->doubleBuffer,
+                     cfg->redSize, cfg->greenSize, cfg->blueSize, cfg->alphaSize,
+                     cfg->depthSize, cfg->stencilSize, cfg->numSamples, cfg->windowDrawable);
+ 
+@@ -4015,7 +4015,6 @@ static void wined3d_adapter_init_fb_cfgs(struct wined3d_adapter_gl *adapter_gl,
+                 continue;
+             }
+ 
+-            cfg->iPixelFormat = format_id;
+             cfg->redSize = pfd.cRedBits;
+             cfg->greenSize = pfd.cGreenBits;
+             cfg->blueSize = pfd.cBlueBits;
+@@ -4032,7 +4031,7 @@ static void wined3d_adapter_init_fb_cfgs(struct wined3d_adapter_gl *adapter_gl,
+ 
+             TRACE("iPixelFormat=%d, iPixelType=%#x, doubleBuffer=%d, RGBA=%d/%d/%d/%d, "
+                     "depth=%d, stencil=%d, windowDrawable=%d\n",
+-                    cfg->iPixelFormat, cfg->iPixelType, cfg->doubleBuffer,
++                    format_id, cfg->iPixelType, cfg->doubleBuffer,
+                     cfg->redSize, cfg->greenSize, cfg->blueSize, cfg->alphaSize,
+                     cfg->depthSize, cfg->stencilSize, cfg->windowDrawable);
+ 
+@@ -4358,8 +4357,22 @@ static bool adapter_gl_alloc_bo(struct wined3d_device *device, struct wined3d_re
+         flags = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_CLIENT_STORAGE_BIT;
+     }
+ 
+-    if (!(bo_gl = malloc(sizeof(*bo_gl))))
+-        return false;
++    /* Try to recycle a bo_gl struct from the free pool. */
++    wined3d_device_bo_map_lock(device);
++    if (device->bo_gl_free_pool)
++    {
++        bo_gl = CONTAINING_RECORD(device->bo_gl_free_pool, struct wined3d_bo_gl, b);
++        device->bo_gl_free_pool = (struct wined3d_bo *)bo_gl->b.map_ptr;
++        --device->bo_gl_free_pool_count;
++        wined3d_device_bo_map_unlock(device);
++        memset(bo_gl, 0, sizeof(*bo_gl));
++    }
++    else
++    {
++        wined3d_device_bo_map_unlock(device);
++        if (!(bo_gl = malloc(sizeof(*bo_gl))))
++            return false;
++    }
+ 
+     if (!(wined3d_device_gl_create_bo(device_gl, NULL, size, binding, usage, coherent, flags, bo_gl)))
+     {
+diff --git a/dlls/wined3d/buffer.c b/dlls/wined3d/buffer.c
+index 6b92e12f..d3babe15 100644
+--- a/dlls/wined3d/buffer.c
++++ b/dlls/wined3d/buffer.c
+@@ -739,8 +739,24 @@ static void wined3d_buffer_set_bo(struct wined3d_buffer *buffer, struct wined3d_
+ 
+         if (!--prev_bo->refcount)
+         {
++            struct wined3d_device *device = context->device;
++
+             wined3d_context_destroy_bo(context, prev_bo);
+-            free(prev_bo);
++
++            /* Recycle the bo_gl struct instead of freeing it. */
++            wined3d_device_bo_map_lock(device);
++            if (device->bo_gl_free_pool_count < WINED3D_BO_GL_FREE_POOL_MAX)
++            {
++                prev_bo->map_ptr = device->bo_gl_free_pool;
++                device->bo_gl_free_pool = prev_bo;
++                ++device->bo_gl_free_pool_count;
++                wined3d_device_bo_map_unlock(device);
++            }
++            else
++            {
++                wined3d_device_bo_map_unlock(device);
++                free(prev_bo);
++            }
+         }
+     }
+ 
+diff --git a/dlls/wined3d/context_gl.c b/dlls/wined3d/context_gl.c
+index e150e2bd..879923bf 100644
+--- a/dlls/wined3d/context_gl.c
++++ b/dlls/wined3d/context_gl.c
+@@ -1296,6 +1296,7 @@ static BOOL wined3d_context_gl_set_gl_context(struct wined3d_context_gl *context
+         TRACE("Using backup DC %p.\n", context_gl->dc);
+         context_gl->dc_is_private = TRUE;
+         context_gl->dc_has_format = FALSE;
++        context_gl->internal_format_set = FALSE;
+ 
+         if (!wined3d_context_gl_set_pixel_format(context_gl))
+         {
+@@ -1752,7 +1753,7 @@ static int context_choose_pixel_format(const struct wined3d_device *device, HDC
+ 
+         if (value > current_value)
+         {
+-            iPixelFormat = cfg->iPixelFormat;
++            iPixelFormat = i + 1;
+             current_value = value;
+         }
+     }
+@@ -2609,8 +2610,48 @@ static void wined3d_context_gl_cleanup_resources(struct wined3d_context_gl *cont
+         wined3d_device_gl_free_memory(device_gl, r->block);
+         if (i != --count)
+             *r = blocks[count];
++
+     }
+     device_gl->retired_block_count = count;
++
++    /* Clean up BO free list: delete BOs that have been idle for a while.
++     * Keep at most half the max capacity of completed (recyclable) BOs. */
++    {
++        SIZE_T free_count = device_gl->bo_free_list_count;
++        SIZE_T completed = 0, j = 0;
++
++        for (j = 0; j < free_count; ++j)
++        {
++            if (device_gl->bo_free_list[j].fence_id <= id)
++                ++completed;
++        }
++
++        if (completed > WINED3D_BO_FREE_LIST_MAX / 2)
++        {
++            const struct wined3d_gl_info *gl_info = context_gl->gl_info;
++            SIZE_T to_evict = completed - WINED3D_BO_FREE_LIST_MAX / 2;
++            SIZE_T evicted = 0;
++
++            j = 0;
++            while (j < device_gl->bo_free_list_count && evicted < to_evict)
++            {
++                struct wined3d_retired_bo_gl *r = &device_gl->bo_free_list[j];
++
++                if (r->fence_id <= id)
++                {
++                    GL_EXTCALL(glDeleteBuffers(1, &r->id));
++                    if (j != device_gl->bo_free_list_count - 1)
++                        *r = device_gl->bo_free_list[device_gl->bo_free_list_count - 1];
++                    --device_gl->bo_free_list_count;
++                    ++evicted;
++                }
++                else
++                {
++                    ++j;
++                }
++            }
++        }
++    }
+ }
+ 
+ void wined3d_context_gl_wait_command_fence(struct wined3d_context_gl *context_gl, uint64_t id)
+@@ -2677,6 +2718,33 @@ static void wined3d_context_gl_destroy_allocator_block(struct wined3d_context_gl
+         return;
+     }
+ 
++    /* Bound retired_blocks[] to prevent unbounded RSS growth when the fence
++     * gap widens (issue 46). Each retired block pins its 64 MiB allocator
++     * chunk; without a cap, 32k+ entries can accumulate during fence stalls. */
++    if (device_gl->retired_block_count >= WINED3D_RETIRED_BLOCKS_MAX)
++    {
++        SIZE_T i;
++        uint64_t oldest;
++
++        /* Try non-blocking drain first. */
++        wined3d_context_gl_cleanup_resources(context_gl);
++
++        if (device_gl->retired_block_count >= WINED3D_RETIRED_BLOCKS_MAX)
++        {
++            /* Submit any pending fence so all retired blocks' fences are
++             * in flight, then block-wait for the oldest pending fence. */
++            wined3d_context_gl_submit_command_fence(context_gl);
++
++            oldest = ~(uint64_t)0;
++            for (i = 0; i < device_gl->retired_block_count; ++i)
++            {
++                if (device_gl->retired_blocks[i].fence_id < oldest)
++                    oldest = device_gl->retired_blocks[i].fence_id;
++            }
++            wined3d_context_gl_wait_command_fence(context_gl, oldest);
++        }
++    }
++
+     if (!wined3d_array_reserve((void **)&device_gl->retired_blocks,
+             &device_gl->retired_blocks_size, device_gl->retired_block_count + 1,
+             sizeof(*device_gl->retired_blocks)))
+@@ -2715,8 +2783,6 @@ GLuint wined3d_context_gl_allocate_vram_chunk_buffer(struct wined3d_context_gl *
+ 
+     checkGLcall("buffer object creation");
+ 
+-    TRACE("Created buffer object %u.\n", id);
+-
+     return id;
+ }
+ 
+@@ -2781,6 +2847,134 @@ static void wined3d_allocator_chunk_gl_unmap(struct wined3d_allocator_chunk_gl *
+     wined3d_allocator_chunk_gl_unlock(chunk_gl);
+ }
+ 
++/* Device-global BO free list synchronization:
++ *
++ * The free list (device_gl->bo_free_list / bo_free_list_count) is device-wide
++ * but is only ever mutated through a valid wined3d_context_gl — push from
++ * wined3d_context_gl_destroy_bo, pop from wined3d_bo_gl_map and
++ * wined3d_device_gl_create_bo, and the cleanup sweeps in
++ * wined3d_context_gl_cleanup_resources / wined3d_device_gl_delete_opengl_contexts_cs.
++ * The client-thread allocation fast path (wined3d_device_gl_create_bo with
++ * context_gl == NULL) explicitly skips the free list and only touches the
++ * separately-locked suballocator. A GL context is thread-affine to the thread
++ * that owns it (the CS thread under CSMT, otherwise the single app thread), so
++ * all of these accesses are serialized onto that one thread — no concurrent
++ * cross-thread mutation occurs and no additional lock/atomic is required. */
++
++/* Push a non-suballocated BO to the device free list for later recycling.
++ * The BO must already be unmapped. Returns TRUE if recycled, FALSE if the
++ * free list is full and the caller should glDeleteBuffers instead. */
++BOOL wined3d_context_gl_push_free_bo(struct wined3d_context_gl *context_gl,
++        const struct wined3d_bo_gl *bo)
++{
++    struct wined3d_device_gl *device_gl = wined3d_device_gl(context_gl->c.device);
++    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
++    struct wined3d_retired_bo_gl *r;
++
++    if (device_gl->bo_free_list_count >= WINED3D_BO_FREE_LIST_MAX)
++    {
++        /* Free list full — evict oldest entry to make room. */
++        r = &device_gl->bo_free_list[0];
++        TRACE("Evicting GL buffer %u (size %Iu) from free list.\n", r->id, r->size);
++        GL_EXTCALL(glDeleteBuffers(1, &r->id));
++        /* Move last entry into slot 0. */
++        if (device_gl->bo_free_list_count > 1)
++            *r = device_gl->bo_free_list[device_gl->bo_free_list_count - 1];
++        --device_gl->bo_free_list_count;
++    }
++
++    if (!wined3d_array_reserve((void **)&device_gl->bo_free_list,
++            &device_gl->bo_free_list_size, device_gl->bo_free_list_count + 1,
++            sizeof(*device_gl->bo_free_list)))
++    {
++        ERR("Failed to grow BO free list.\n");
++        return FALSE;
++    }
++
++    r = &device_gl->bo_free_list[device_gl->bo_free_list_count++];
++    r->id = bo->id;
++    r->size = bo->size;
++    r->binding = bo->binding;
++    r->usage = bo->usage;
++    r->flags = bo->flags;
++    r->coherent = bo->b.coherent;
++    r->fence_id = bo->command_fence_id;
++
++    TRACE("Pushed GL buffer %u (size %Iu, binding %#x) to free list (%Iu entries).\n",
++            bo->id, bo->size, bo->binding, device_gl->bo_free_list_count);
++    return TRUE;
++}
++
++/* Try to pop a matching BO from the device free list. The BO must have
++ * completed its fence (GPU done), and match binding and flags exactly.
++ * Size must be >= requested and <= 2x requested to limit waste. */
++BOOL wined3d_context_gl_pop_free_bo(struct wined3d_context_gl *context_gl,
++        GLsizeiptr size, GLenum binding, GLenum usage, bool coherent, GLbitfield flags,
++        struct wined3d_bo_gl *bo)
++{
++    struct wined3d_device_gl *device_gl = wined3d_device_gl(context_gl->c.device);
++    struct wined3d_retired_bo_gl *r;
++    SIZE_T i;
++
++
++    for (i = 0; i < device_gl->bo_free_list_count; ++i)
++    {
++        r = &device_gl->bo_free_list[i];
++
++        if (r->fence_id > device_gl->completed_fence_id)
++        {
++            continue;
++        }
++        if (r->binding != binding || r->flags != flags)
++        {
++            continue;
++        }
++        /* Also match usage and coherency: a recycled BO with different usage
++         * or coherency than requested would otherwise be handed back with the
++         * retired attributes, causing subtle stale-data / sync issues. */
++        if (r->usage != usage || r->coherent != coherent)
++        {
++            continue;
++        }
++        /* Reject smaller than requested, or more than ~2x (waste cap). Use
++         * division instead of "size * 2" to avoid overflowing the signed
++         * GLsizeiptr multiply on pathological (exabyte) sizes. */
++        if (r->size < size || r->size / 2 > size)
++        {
++            continue;
++        }
++
++        /* Found a match — recycle this BO. usage/coherent equal the requested
++         * values here (matched above), so set them from the request explicitly. */
++        bo->id = r->id;
++        bo->memory = NULL;
++        bo->size = r->size;
++        bo->binding = r->binding;
++        bo->usage = usage;
++        bo->flags = r->flags;
++        bo->b.coherent = coherent;
++        list_init(&bo->b.users);
++        bo->command_fence_id = 0;
++        bo->b.buffer_offset = 0;
++        bo->b.memory_offset = 0;
++        bo->b.map_ptr = NULL;
++        bo->b.client_map_count = 0;
++        bo->b.refcount = 1;
++
++        TRACE("Recycled GL buffer %u (size %Iu) from free list for request size %Iu.\n",
++                bo->id, bo->size, size);
++
++        /* Remove from free list by swapping with last. */
++        if (i != device_gl->bo_free_list_count - 1)
++            *r = device_gl->bo_free_list[device_gl->bo_free_list_count - 1];
++        --device_gl->bo_free_list_count;
++
++        return TRUE;
++    }
++
++    return FALSE;
++}
++
+ static void *wined3d_bo_gl_map(struct wined3d_bo_gl *bo, struct wined3d_context_gl *context_gl, uint32_t flags)
+ {
+     struct wined3d_device_gl *device_gl = wined3d_device_gl(context_gl->c.device);
+@@ -2793,23 +2987,35 @@ static void *wined3d_bo_gl_map(struct wined3d_bo_gl *bo, struct wined3d_context_
+ 
+     if ((flags & WINED3D_MAP_DISCARD) && bo->command_fence_id > device_gl->completed_fence_id)
+     {
+-        if (wined3d_device_gl_create_bo(device_gl, context_gl, bo->size,
++        /* Try to get a recycled BO from the free list first. */
++        if (wined3d_context_gl_pop_free_bo(context_gl, bo->size,
+                 bo->binding, bo->usage, bo->b.coherent, bo->flags, &tmp))
+         {
+-            LIST_FOR_EACH_ENTRY(bo_user, &bo->b.users, struct wined3d_bo_user, entry)
+-                bo_user->valid = false;
+-            list_init(&bo->b.users);
++        }
++        else if (!wined3d_device_gl_create_bo(device_gl, context_gl, bo->size,
++                bo->binding, bo->usage, bo->b.coherent, bo->flags, &tmp))
++        {
++            ERR("Failed to create new buffer object.\n");
++            goto wait;
++        }
+ 
+-            wined3d_context_gl_destroy_bo(context_gl, bo);
+-            *bo = tmp;
+-            list_init(&bo->b.users);
++        LIST_FOR_EACH_ENTRY(bo_user, &bo->b.users, struct wined3d_bo_user, entry)
++            bo_user->valid = false;
++        list_init(&bo->b.users);
+ 
+-            goto map;
+-        }
++        /* destroy_bo unmaps before recycling via push_free_bo internally.
++         * Calling push_free_bo directly would skip glUnmapBuffer and a later
++         * map after pop_free_bo would fail with "Buffer must be bound and
++         * not mapped" (Kontakt 7 crash). */
++        wined3d_context_gl_destroy_bo(context_gl, bo);
++        *bo = tmp;
++        list_init(&bo->b.users);
+ 
+-        ERR("Failed to create new buffer object.\n");
++        goto map;
+     }
+ 
++wait:
++
+     if (context_gl->c.d3d_info->fences)
+     {
+         if (bo->command_fence_id == device_gl->current_fence_id)
+@@ -3116,10 +3322,12 @@ void wined3d_context_gl_destroy_bo(struct wined3d_context_gl *context_gl, struct
+         adapter_adjust_mapped_memory(context_gl->c.device->adapter, -bo->size);
+     }
+ 
+-    TRACE("Destroying GL buffer %u.\n", bo->id);
+-
+-    GL_EXTCALL(glDeleteBuffers(1, &bo->id));
+-    checkGLcall("buffer object destruction");
++    /* Try to recycle the GL buffer instead of deleting it. */
++    if (!wined3d_context_gl_push_free_bo(context_gl, bo))
++    {
++        GL_EXTCALL(glDeleteBuffers(1, &bo->id));
++        checkGLcall("buffer object destruction");
++    }
+     bo->id = 0;
+ }
+ 
+diff --git a/dlls/wined3d/cs.c b/dlls/wined3d/cs.c
+index da903e39..90168bb0 100644
+--- a/dlls/wined3d/cs.c
++++ b/dlls/wined3d/cs.c
+@@ -164,6 +164,11 @@ struct wined3d_cs_present
+     RECT dst_rect;
+     unsigned int swap_interval;
+     uint32_t flags;
++    /* Snapshot of the composition dirty rects at emit time, handed off to the
++     * CS thread so the present path does not read the live client-side buffer
++     * (which the app may concurrently overwrite for the next frame). */
++    RECT present_dirty_rects[16];
++    unsigned int present_dirty_rect_count;
+ };
+ 
+ struct wined3d_cs_clear
+@@ -633,6 +638,13 @@ static const char *debug_cs_op(enum wined3d_cs_op op)
+     return wine_dbg_sprintf("UNKNOWN_OP(%#x)", op);
+ }
+ 
++static const char *debug_cs_packet(const struct wined3d_cs_packet *packet)
++{
++    if (!packet->size)
++        return wine_dbg_sprintf("padding at %p", packet);
++    return wine_dbg_sprintf("op %s at %p", debug_cs_op(*(const enum wined3d_cs_op *)packet->data), packet);
++}
++
+ static struct wined3d_cs_packet *wined3d_next_cs_packet(const uint8_t *data, SIZE_T *offset, SIZE_T mask)
+ {
+     struct wined3d_cs_packet *packet = (struct wined3d_cs_packet *)&data[*offset & mask];
+@@ -700,8 +712,35 @@ static void wined3d_cs_exec_present(struct wined3d_cs *cs, const void *data)
+                     &src_rect, WINED3D_BLT_ALPHA_TEST, NULL, WINED3D_TEXF_POINT);
+     }
+ 
++    /* Publish this frame's dirty rects into the CS-thread-only active buffer
++     * that swapchain_blit_gdi reads.  Only the CS thread touches
++     * cs_present_dirty_rects[], so the present path is free of the client/CS
++     * data race on the live present_dirty_rects[] buffer. */
++    swapchain->cs_present_dirty_rect_count = op->present_dirty_rect_count;
++    if (op->present_dirty_rect_count)
++        memcpy(swapchain->cs_present_dirty_rects, op->present_dirty_rects,
++                op->present_dirty_rect_count * sizeof(*swapchain->cs_present_dirty_rects));
++
+     swapchain->swapchain_ops->swapchain_present(swapchain, &op->src_rect, &op->dst_rect, op->swap_interval, op->flags);
+ 
++    /* FLIP_SEQUENTIAL: copy the just-presented content back into back_buffer[0]
++     * so the app can do incremental rendering (DirtyRects). After rotation,
++     * back_buffers[N-1] has the presented frame; copy it to back_buffers[0].
++     * This MUST happen in the CS thread (not from DXGI) to avoid a race with
++     * the frame latency event that wakes the app. */
++    if ((desc->swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
++            || desc->swap_effect == WINED3D_SWAP_EFFECT_FLIP_DISCARD)
++            && desc->backbuffer_count >= 2)
++    {
++        struct wined3d_texture *copy_src = swapchain->back_buffers[desc->backbuffer_count - 1];
++        struct wined3d_texture *copy_dst = swapchain->back_buffers[0];
++        RECT copy_rect;
++
++        SetRect(&copy_rect, 0, 0, copy_dst->resource.width, copy_dst->resource.height);
++        wined3d_device_context_blt(&cs->c, copy_dst, 0, &copy_rect,
++                copy_src, 0, &copy_rect, 0, NULL, WINED3D_TEXF_POINT);
++    }
++
+     /* Discard buffers if the swap effect allows it. */
+     back_buffer = swapchain->back_buffers[desc->backbuffer_count - 1];
+     if (desc->swap_effect == WINED3D_SWAP_EFFECT_DISCARD || desc->swap_effect == WINED3D_SWAP_EFFECT_FLIP_DISCARD)
+@@ -764,6 +803,22 @@ void wined3d_cs_emit_present(struct wined3d_cs *cs, struct wined3d_swapchain *sw
+     op->swap_interval = swap_interval;
+     op->flags = flags;
+ 
++    /* Snapshot the client-side dirty rects into the op.  This runs on the app
++     * thread under wined3d_mutex (held by wined3d_swapchain_present), in program
++     * order after wined3d_swapchain_set_dirty_rects, so it captures this frame's
++     * rects; the CS thread later reads them from the op, never from the live
++     * swapchain buffer. */
++    op->present_dirty_rect_count = swapchain->present_dirty_rect_count;
++    if (swapchain->present_dirty_rect_count)
++        memcpy(op->present_dirty_rects, swapchain->present_dirty_rects,
++                swapchain->present_dirty_rect_count * sizeof(*op->present_dirty_rects));
++    /* Consume the pending rects: they apply to exactly this present.  A
++     * subsequent plain Present() that does not call set_dirty_rects() (only
++     * Present1 does) must then present a full frame, not re-use stale rects.
++     * Reset here on the app thread rather than on the CS thread after the blit,
++     * so the client buffer is never written from two threads. */
++    swapchain->present_dirty_rect_count = 0;
++
+     pending = InterlockedIncrement(&cs->pending_presents);
+ 
+     wined3d_resource_reference(&swapchain->front_buffer->resource);
+@@ -2785,7 +2840,8 @@ void wined3d_device_context_emit_update_sub_resource(struct wined3d_device_conte
+     if (resource->type == WINED3D_RTYPE_BUFFER && box->right - box->left == resource->size)
+         invalidate_client_address(resource);
+ 
+-    if (context->ops->map_upload_bo(context, resource, sub_resource_idx, &map_desc, box, WINED3D_MAP_WRITE))
++    if (context->ops->map_upload_bo(context, resource, sub_resource_idx, &map_desc, box,
++            WINED3D_MAP_WRITE | ((resource->type == WINED3D_RTYPE_BUFFER) ? WINED3D_MAP_DISCARD : 0)))
+     {
+         wined3d_format_copy_data(resource->format, data, row_pitch, slice_pitch, map_desc.data, map_desc.row_pitch,
+                 map_desc.slice_pitch, box->right - box->left, box->bottom - box->top, box->back - box->front);
+@@ -3236,7 +3292,7 @@ static void wined3d_cs_queue_submit(struct wined3d_cs_queue *queue, struct wined
+     size_t packet_size;
+ 
+     packet = (struct wined3d_cs_packet *)&queue->data[queue->head & WINED3D_CS_QUEUE_MASK];
+-    TRACE("Queuing op %s at %p.\n", debug_cs_op(*(const enum wined3d_cs_op *)packet->data), packet);
++    TRACE("Queuing %s.\n", debug_cs_packet(packet));
+     packet_size = FIELD_OFFSET(struct wined3d_cs_packet, data[packet->size]);
+     InterlockedExchange((LONG *)&queue->head, queue->head + packet_size);
+ 
+@@ -3426,7 +3482,7 @@ static inline bool wined3d_cs_execute_next(struct wined3d_cs *cs, struct wined3d
+     {
+         opcode = *(const enum wined3d_cs_op *)packet->data;
+ 
+-        TRACE("Executing %s at %p.\n", debug_cs_op(opcode), packet);
++        TRACE("Executing %s.\n", debug_cs_packet(packet));
+         if (opcode >= WINED3D_CS_OP_STOP)
+         {
+             if (opcode > WINED3D_CS_OP_STOP)
+@@ -3437,7 +3493,7 @@ static inline bool wined3d_cs_execute_next(struct wined3d_cs *cs, struct wined3d
+         wined3d_cs_command_lock(cs);
+         wined3d_cs_op_handlers[opcode](cs, packet->data);
+         wined3d_cs_command_unlock(cs);
+-        TRACE("%s at %p executed.\n", debug_cs_op(opcode), packet);
++        TRACE("%s executed.\n", debug_cs_packet(packet));
+     }
+ 
+     InterlockedExchange((LONG *)&queue->tail, tail);
+@@ -4619,8 +4675,24 @@ static void wined3d_command_list_destroy_object(void *object)
+         {
+             if (!--bo->refcount)
+             {
++                struct wined3d_device *device = list->device;
++
+                 wined3d_context_destroy_bo(context, bo);
+-                free(bo);
++
++                /* Recycle the bo struct instead of freeing it. */
++                wined3d_device_bo_map_lock(device);
++                if (device->bo_gl_free_pool_count < WINED3D_BO_GL_FREE_POOL_MAX)
++                {
++                    bo->map_ptr = device->bo_gl_free_pool;
++                    device->bo_gl_free_pool = bo;
++                    ++device->bo_gl_free_pool_count;
++                    wined3d_device_bo_map_unlock(device);
++                }
++                else
++                {
++                    wined3d_device_bo_map_unlock(device);
++                    free(bo);
++                }
+             }
+         }
+         else
+diff --git a/dlls/wined3d/device.c b/dlls/wined3d/device.c
+index a3e113a9..5286b410 100644
+--- a/dlls/wined3d/device.c
++++ b/dlls/wined3d/device.c
+@@ -242,6 +242,18 @@ void wined3d_device_cleanup(struct wined3d_device *device)
+     wine_rb_destroy(&device->depth_stencil_states, device_leftover_depth_stencil_state, NULL);
+     wine_rb_destroy(&device->so_descs, device_free_so_desc, NULL);
+ 
++    /* Drain the bo_gl free pool. */
++    {
++        struct wined3d_bo *bo = device->bo_gl_free_pool;
++        while (bo)
++        {
++            struct wined3d_bo *next = (struct wined3d_bo *)bo->map_ptr;
++            free(CONTAINING_RECORD(bo, struct wined3d_bo_gl, b));
++            bo = next;
++        }
++        device->bo_gl_free_pool = NULL;
++        device->bo_gl_free_pool_count = 0;
++    }
+     wined3d_lock_cleanup(&device->bo_map_lock);
+ 
+     wined3d_decref(device->wined3d);
+@@ -1368,13 +1380,34 @@ bool wined3d_device_gl_create_bo(struct wined3d_device_gl *device_gl, struct win
+             }
+             else if (context_gl)
+             {
++                struct wined3d_bo_gl tmp_bo;
+                 WARN_(d3d_perf)("Not allocating chunk memory for binding type %#x.\n", binding);
+-                id = wined3d_context_gl_allocate_vram_chunk_buffer(context_gl, memory_type_idx, size);
++                if (wined3d_context_gl_pop_free_bo(context_gl, size, binding, usage, coherent, flags, &tmp_bo))
++                    id = tmp_bo.id;
++                else
++                    id = wined3d_context_gl_allocate_vram_chunk_buffer(context_gl, memory_type_idx, size);
+             }
+         }
+         else
+         {
+-            id = wined3d_context_gl_allocate_vram_chunk_buffer(context_gl, memory_type_idx, size);
++            /* Try to recycle a GL buffer from the free list first. */
++            if (context_gl)
++            {
++                struct wined3d_bo_gl tmp_bo;
++                if (wined3d_context_gl_pop_free_bo(context_gl, size, binding, usage, coherent, flags, &tmp_bo))
++                {
++                    id = tmp_bo.id;
++                    /* The recycled buffer may be larger, that's fine. */
++                }
++                else
++                {
++                    id = wined3d_context_gl_allocate_vram_chunk_buffer(context_gl, memory_type_idx, size);
++                }
++            }
++            else
++            {
++                id = 0;
++            }
+         }
+ 
+         if (!id)
+@@ -1438,6 +1471,25 @@ void wined3d_device_gl_delete_opengl_contexts_cs(void *object)
+ 
+     TRACE("device %p.\n", device_gl);
+ 
++    /* Clean up BO free list. */
++    if (device_gl->bo_free_list_count)
++    {
++        context = context_acquire(&device_gl->d, NULL, 0);
++        context_gl = wined3d_context_gl(context);
++        {
++            const struct wined3d_gl_info *gl_info = context_gl->gl_info;
++            SIZE_T j;
++
++            for (j = 0; j < device_gl->bo_free_list_count; ++j)
++                GL_EXTCALL(glDeleteBuffers(1, &device_gl->bo_free_list[j].id));
++            device_gl->bo_free_list_count = 0;
++        }
++        context_release(context);
++    }
++    free(device_gl->bo_free_list);
++    device_gl->bo_free_list = NULL;
++    device_gl->bo_free_list_size = 0;
++
+     device = &device_gl->d;
+ 
+     LIST_FOR_EACH_ENTRY(shader, &device->shaders, struct wined3d_shader, shader_list_entry)
+@@ -1470,6 +1522,8 @@ void wined3d_device_gl_delete_opengl_contexts_cs(void *object)
+ 
+         wined3d_release_dc(device_gl->backup_wnd, device_gl->backup_dc);
+         DestroyWindow(device_gl->backup_wnd);
++        device_gl->backup_dc = NULL;
++        device_gl->backup_wnd = NULL;
+     }
+ }
+ 
+@@ -4413,7 +4467,7 @@ void CDECL wined3d_device_context_update_sub_resource(struct wined3d_device_cont
+ void CDECL wined3d_device_context_resolve_sub_resource(struct wined3d_device_context *context,
+         struct wined3d_resource *dst_resource, unsigned int dst_sub_resource_idx,
+         struct wined3d_resource *src_resource, unsigned int src_sub_resource_idx,
+-        enum wined3d_format_id format_id)
++        uint32_t flags, enum wined3d_format_id format_id)
+ {
+     struct wined3d_texture *dst_texture, *src_texture;
+     unsigned int dst_level, src_level;
+@@ -4457,7 +4511,7 @@ void CDECL wined3d_device_context_resolve_sub_resource(struct wined3d_device_con
+     SetRect(&src_rect, 0, 0, wined3d_texture_get_level_width(src_texture, src_level),
+             wined3d_texture_get_level_height(src_texture, src_level));
+     wined3d_device_context_blt(context, dst_texture, dst_sub_resource_idx, &dst_rect,
+-            src_texture, src_sub_resource_idx, &src_rect, 0, &fx, WINED3D_TEXF_POINT);
++            src_texture, src_sub_resource_idx, &src_rect, flags, &fx, WINED3D_TEXF_POINT);
+     wined3d_device_context_unlock(context);
+ }
+ 
+diff --git a/dlls/wined3d/directx.c b/dlls/wined3d/directx.c
+index 175fa8d6..d1060eca 100644
+--- a/dlls/wined3d/directx.c
++++ b/dlls/wined3d/directx.c
+@@ -484,6 +484,7 @@ static const struct wined3d_gpu_description gpu_description_table[] =
+     {HW_VENDOR_NVIDIA,     CARD_NVIDIA_GEFORCE_RTX3080,    "NVIDIA GeForce RTX 3080",          DRIVER_NVIDIA_KEPLER,  10240},
+     {HW_VENDOR_NVIDIA,     CARD_NVIDIA_TESLA_T4,           "NVIDIA Tesla T4",                  DRIVER_NVIDIA_KEPLER,  16384},
+     {HW_VENDOR_NVIDIA,     CARD_NVIDIA_AMPERE_A10,         "NVIDIA Ampere A10",                DRIVER_NVIDIA_KEPLER,  24576},
++    {HW_VENDOR_NVIDIA,     CARD_NVIDIA_AMPERE_A10G,        "NVIDIA A10G",                      DRIVER_NVIDIA_KEPLER,  24564},
+ 
+     /* AMD cards */
+     {HW_VENDOR_AMD,        CARD_AMD_RAGE_128PRO,           "ATI Rage Fury",                    DRIVER_AMD_RAGE_128PRO,  16  },
+diff --git a/dlls/wined3d/sampler.c b/dlls/wined3d/sampler.c
+index afd26a52..ee7d8776 100644
+--- a/dlls/wined3d/sampler.c
++++ b/dlls/wined3d/sampler.c
+@@ -139,7 +139,7 @@ void wined3d_sampler_gl_init(struct wined3d_sampler_gl *sampler_gl, struct wined
+         wined3d_cs_init_object(device->cs, wined3d_sampler_gl_cs_init, sampler_gl);
+ }
+ 
+-static VkFilter vk_filter_from_wined3d(enum wined3d_texture_filter_type f)
++VkFilter vk_filter_from_wined3d(enum wined3d_texture_filter_type f)
+ {
+     switch (f)
+     {
+diff --git a/dlls/wined3d/stateblock.c b/dlls/wined3d/stateblock.c
+index ce861b8c..dc5cd0a0 100644
+--- a/dlls/wined3d/stateblock.c
++++ b/dlls/wined3d/stateblock.c
+@@ -2715,7 +2715,7 @@ static void resolve_depth_buffer(struct wined3d_device *device)
+         return;
+ 
+     wined3d_device_context_resolve_sub_resource(&device->cs->c, dst_resource, 0,
+-            src_view->resource, src_view->sub_resource_idx, dst_resource->format->id);
++            src_view->resource, src_view->sub_resource_idx, 0, dst_resource->format->id);
+ }
+ 
+ static void wined3d_device_set_render_state(struct wined3d_device *device,
+diff --git a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
+index 6f01d520..b5559c58 100644
+--- a/dlls/wined3d/swapchain.c
++++ b/dlls/wined3d/swapchain.c
+@@ -34,6 +34,37 @@ void wined3d_swapchain_cleanup(struct wined3d_swapchain *swapchain)
+ 
+     TRACE("Destroying swapchain %p.\n", swapchain);
+ 
++    if (swapchain->comp_dc)
++    {
++        SelectObject(swapchain->comp_dc, swapchain->comp_old_bitmap);
++        DeleteObject(swapchain->comp_bitmap);
++        DeleteDC(swapchain->comp_dc);
++        swapchain->comp_dc = NULL;
++        swapchain->comp_bits = NULL;
++    }
++
++    /* Remove the composition props this swapchain set on its window during
++     * Present (see SetPropW of __wine_dcomp_comp_dc/_size/_bits). The comp_dc
++     * and bits they reference are freed above; leaving the props behind lets
++     * the child-compositing path read a stale HDC/bits pointer after the
++     * swapchain is gone. Only our own props are touched — __wine_dcomp_child_*
++     * and __wine_dcomp_is_child are owned by dcomp/dxgi and removed there. */
++    if (swapchain->win_handle)
++    {
++        RemovePropW(swapchain->win_handle, L"__wine_dcomp_comp_dc");
++        RemovePropW(swapchain->win_handle, L"__wine_dcomp_comp_size");
++        RemovePropW(swapchain->win_handle, L"__wine_dcomp_comp_bits");
++    }
++
++    if (swapchain->surface_bits)
++    {
++        HeapFree(GetProcessHeap(), 0, swapchain->surface_bits);
++        swapchain->surface_bits = NULL;
++        swapchain->surface_width = 0;
++        swapchain->surface_height = 0;
++        swapchain->surface_valid = FALSE;
++    }
++
+     wined3d_swapchain_state_cleanup(&swapchain->state);
+     wined3d_swapchain_set_gamma_ramp(swapchain, 0, &swapchain->orig_gamma);
+ 
+@@ -189,6 +220,74 @@ void CDECL wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, HWN
+     swapchain->win_handle = window;
+ }
+ 
++void CDECL wined3d_swapchain_set_device_window(struct wined3d_swapchain *swapchain, HWND window)
++{
++    TRACE("Setting swapchain %p device window from %p to %p.\n",
++            swapchain, swapchain->state.device_window, window);
++
++    swapchain->state.device_window = window;
++    swapchain->state.desc.device_window = window;
++    wined3d_swapchain_set_window(swapchain, window);
++}
++
++/* Composition present-state setters, called from the DXGI/client thread.
++ *
++ * set_dirty_rects() writes the per-frame dirty-rect buffer that the present
++ * path consumes on the CS thread.  To avoid the client/CS data race on that
++ * buffer (a pipelined next-frame set_dirty_rects() overwriting rects while a
++ * CS-thread present of the previous frame is still reading them), the rects are
++ * handed off through the present CS op: emit snapshots present_dirty_rects[]
++ * into the op (app thread, after this setter), and wined3d_cs_exec_present
++ * copies the op snapshot into cs_present_dirty_rects[], which is the only buffer
++ * the present path (swapchain_blit_gdi) reads.  present_dirty_rects[] is thus
++ * touched only on the app thread, cs_present_dirty_rects[] only on the CS thread.
++ *
++ * set_force_gdi_present() / set_premultiplied_alpha() write state.desc.flags
++ * bits that are also read on the CS-thread present path, but these are
++ * configured once at swapchain/target creation (see dlls/dxgi/factory.c) before
++ * any Present, never per frame, so they are not raced in practice and do not
++ * need the per-frame handoff. */
++void CDECL wined3d_swapchain_set_force_gdi_present(struct wined3d_swapchain *swapchain, BOOL force)
++{
++    TRACE("swapchain %p, force %d.\n", swapchain, force);
++
++    if (force)
++        swapchain->state.desc.flags |= WINED3D_SWAPCHAIN_FORCE_GDI_PRESENT;
++    else
++        swapchain->state.desc.flags &= ~WINED3D_SWAPCHAIN_FORCE_GDI_PRESENT;
++}
++
++void CDECL wined3d_swapchain_set_prefer_gl_present(struct wined3d_swapchain *swapchain, BOOL prefer)
++{
++    TRACE("swapchain %p, prefer %d.\n", swapchain, prefer);
++
++    if (prefer)
++        swapchain->state.desc.flags |= WINED3D_SWAPCHAIN_PREFER_GL_PRESENT;
++    else
++        swapchain->state.desc.flags &= ~WINED3D_SWAPCHAIN_PREFER_GL_PRESENT;
++}
++
++void CDECL wined3d_swapchain_set_premultiplied_alpha(struct wined3d_swapchain *swapchain, BOOL premultiplied)
++{
++    TRACE("swapchain %p, premultiplied %d.\n", swapchain, premultiplied);
++
++    if (premultiplied)
++        swapchain->state.desc.flags |= WINED3D_SWAPCHAIN_PREMULTIPLIED_ALPHA;
++    else
++        swapchain->state.desc.flags &= ~WINED3D_SWAPCHAIN_PREMULTIPLIED_ALPHA;
++}
++
++void CDECL wined3d_swapchain_set_dirty_rects(struct wined3d_swapchain *swapchain,
++        const RECT *rects, unsigned int count)
++{
++    if (count > ARRAY_SIZE(swapchain->present_dirty_rects))
++        count = ARRAY_SIZE(swapchain->present_dirty_rects);
++
++    if (rects && count)
++        memcpy(swapchain->present_dirty_rects, rects, count * sizeof(*rects));
++    swapchain->present_dirty_rect_count = count;
++}
++
+ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
+         const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
+         unsigned int swap_interval, uint32_t flags)
+@@ -396,6 +495,202 @@ HRESULT CDECL wined3d_swapchain_get_gamma_ramp(const struct wined3d_swapchain *s
+ 
+ /* The is a fallback for cases where we e.g. can't create a GL context or
+  * Vulkan swapchain for the swapchain window. */
++
++/* Merge pixels from src into dst, copying only where source alpha is non-zero.
++ * This preserves existing composition buffer content under transparent areas
++ * left by Clear(transparent) + partial redraw (JUCE/Serum2 pattern).
++ * Used in the "no-dirty full blit" path for SEQUENTIAL swapchains where the
++ * app calls Present() without Present1() dirty rects. */
++static void comp_buffer_alpha_merge(DWORD *dst_bits, unsigned int dst_pitch,
++        const DWORD *src_bits, unsigned int src_pitch,
++        int width, int height)
++{
++    int x, y;
++
++    for (y = 0; y < height; ++y)
++    {
++        const DWORD *src_row = (const DWORD *)((const char *)src_bits
++                + (unsigned int)y * src_pitch);
++        DWORD *dst_row = (DWORD *)((char *)dst_bits
++                + (unsigned int)y * dst_pitch);
++
++        for (x = 0; x < width; ++x)
++        {
++            if (src_row[x] & 0xff000000)
++                dst_row[x] = src_row[x];
++        }
++    }
++}
++
++/* Copy pixels from src to dst, but only where source alpha is non-zero.
++ * This preserves existing composition buffer content under transparent
++ * areas of the back buffer (after Clear(transparent) + partial redraw).
++ * DComp plugins rely on the compositor preserving unmodified regions. */
++static void comp_buffer_alpha_copy(DWORD *dst_bits, unsigned int dst_pitch,
++        const DWORD *src_bits, unsigned int src_pitch,
++        int dst_x, int dst_y, int src_x, int src_y,
++        int width, int height)
++{
++    /* Copy all pixels from backbuffer to comp buffer, including transparent
++     * ones. The old code skipped alpha==0 pixels to preserve comp buffer
++     * content, but this caused stale content because Clear(transparent) +
++     * partial redraw left transparent pixels that never overwrote the old
++     * comp buffer. */
++    int y;
++
++    for (y = 0; y < height; ++y)
++    {
++        const DWORD *src_row = (const DWORD *)((const char *)src_bits
++                + (unsigned int)(src_y + y) * src_pitch) + src_x;
++        DWORD *dst_row = (DWORD *)((char *)dst_bits
++                + (unsigned int)(dst_y + y) * dst_pitch) + dst_x;
++
++        memcpy(dst_row, src_row, width * sizeof(DWORD));
++    }
++}
++
++/* Porter-Duff Over: C_out = C_src + C_dst * (1 - alpha_src)
++ * Both src and dst are premultiplied alpha BGRA. */
++static void composite_over_premul(DWORD *dst, const DWORD *src,
++        unsigned int dst_stride, unsigned int src_stride,
++        int dst_x, int dst_y, int src_w, int src_h,
++        int dst_total_w, int dst_total_h)
++{
++    int y, x;
++    int x_end = dst_x + src_w;
++    int y_end = dst_y + src_h;
++
++    /* Clip to destination bounds */
++    int sx_start = 0, sy_start = 0;
++    if (dst_x < 0) { sx_start = -dst_x; dst_x = 0; }
++    if (dst_y < 0) { sy_start = -dst_y; dst_y = 0; }
++    if (x_end > dst_total_w) x_end = dst_total_w;
++    if (y_end > dst_total_h) y_end = dst_total_h;
++
++    for (y = dst_y; y < y_end; ++y)
++    {
++        DWORD *dp = dst + y * dst_stride + dst_x;
++        const DWORD *sp = src + (sy_start + y - dst_y) * src_stride + sx_start;
++        int width = x_end - dst_x;
++
++        for (x = 0; x < width; ++x)
++        {
++            DWORD s = sp[x];
++            unsigned int sa = (s >> 24) & 0xff;
++
++            if (sa == 0)
++                continue;  /* Fully transparent — skip */
++
++            if (sa == 255)
++            {
++                dp[x] = s;  /* Fully opaque — overwrite */
++                continue;
++            }
++
++            /* Blend: premultiplied over */
++            {
++                DWORD d = dp[x];
++                unsigned int inv_sa = 255 - sa;
++                unsigned int rb = ((d & 0x00ff00ff) * inv_sa + 128);
++                unsigned int g  = ((d & 0x0000ff00) * inv_sa + 128);
++                unsigned int da = ((d >> 24) * inv_sa + 128);
++
++                rb = (rb + ((rb >> 8) & 0x00ff00ff)) >> 8;
++                g  = (g  + ((g  >> 8) & 0x0000ff00)) >> 8;
++                da = (da + (da >> 8)) >> 8;
++
++                dp[x] = (s & 0x00ff00ff) + (rb & 0x00ff00ff)
++                      + ((s & 0x0000ff00) + (g & 0x0000ff00))
++                      + (((sa + da) > 255 ? 255 : (sa + da)) << 24);
++            }
++        }
++    }
++}
++
++/* Composite child visuals onto root's comp buffer.
++ * Reads child info from window properties set by dcomp Commit(). */
++static void swapchain_composite_children(struct wined3d_swapchain *swapchain,
++        unsigned int dst_w, unsigned int dst_h)
++{
++    ULONG_PTR child_count_val;
++    unsigned int child_count, i;
++    WCHAR prop_name[64];
++
++    if (!swapchain->comp_bits)
++        return;
++
++    child_count_val = (ULONG_PTR)GetPropW(swapchain->win_handle,
++            L"__wine_dcomp_child_count");
++    child_count = (unsigned int)child_count_val;
++    if (!child_count)
++        return;
++
++    for (i = 0; i < child_count && i < 16; ++i)
++    {
++        HWND child_wnd;
++        DWORD *child_bits;
++        LPARAM child_dims, child_offset;
++        unsigned int cw, ch;
++        int ox, oy;
++
++        swprintf(prop_name, ARRAY_SIZE(prop_name),
++                L"__wine_dcomp_child_%u_wnd", i);
++        child_wnd = (HWND)GetPropW(swapchain->win_handle, prop_name);
++        if (!child_wnd)
++            continue;
++
++        /* Two paths: swapchain children have a window with comp_bits,
++         * surface children have direct bits stored as properties on target. */
++        if (child_wnd)
++        {
++            child_bits = (DWORD *)GetPropW(child_wnd, L"__wine_dcomp_comp_bits");
++            child_dims = (LPARAM)GetPropW(child_wnd, L"__wine_dcomp_comp_size");
++        }
++        else
++        {
++            /* Direct-bits path for DComp surface children */
++            swprintf(prop_name, ARRAY_SIZE(prop_name),
++                    L"__wine_dcomp_child_%u_bits", i);
++            child_bits = (DWORD *)GetPropW(swapchain->win_handle, prop_name);
++            swprintf(prop_name, ARRAY_SIZE(prop_name),
++                    L"__wine_dcomp_child_%u_size", i);
++            child_dims = (LPARAM)GetPropW(swapchain->win_handle, prop_name);
++        }
++        if (!child_bits || !child_dims)
++            continue;
++
++        cw = LOWORD(child_dims);
++        ch = HIWORD(child_dims);
++
++        swprintf(prop_name, ARRAY_SIZE(prop_name),
++                L"__wine_dcomp_child_%u_offset", i);
++        child_offset = (LPARAM)GetPropW(swapchain->win_handle, prop_name);
++        ox = (short)LOWORD(child_offset);
++        oy = (short)HIWORD(child_offset);
++
++        {
++            static unsigned int comp_log_count;
++            ++comp_log_count;
++            if (comp_log_count <= 10 || !(comp_log_count % 500))
++                TRACE("Composite child #%u: wnd=%p bits=%p %ux%u at (%d,%d) onto %ux%u.\n",
++                        i, child_wnd, child_bits, cw, ch, ox, oy, dst_w, dst_h);
++        }
++
++        /* Flush GDI operations on child's comp_dc before reading bits */
++        if (child_wnd)
++        {
++            HDC child_dc = (HDC)GetPropW(child_wnd, L"__wine_dcomp_comp_dc");
++            if (child_dc)
++                GdiFlush();
++        }
++
++        composite_over_premul(swapchain->comp_bits, child_bits,
++                dst_w, cw,
++                ox, oy, cw, ch,
++                dst_w, dst_h);
++    }
++}
++
+ static void swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
+         struct wined3d_context *context, const RECT *src_rect, const RECT *dst_rect)
+ {
+@@ -416,6 +711,7 @@ static void swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
+     if (!once++)
+         FIXME("Using GDI present.\n");
+ 
++
+     format = back_buffer->resource.format;
+     if (!format->ddi_format)
+     {
+@@ -447,15 +743,320 @@ static void swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
+ 
+     TRACE("Created source DC %p, bitmap %p for backbuffer %p.\n", src_dc, bitmap, back_buffer);
+ 
+-    if (!(dst_dc = GetDCEx(swapchain->win_handle, 0, DCX_USESTYLE | DCX_CACHE)))
+-        ERR("Failed to get destination DC.\n");
++    if ((swapchain->state.desc.flags & WINED3D_SWAPCHAIN_PREMULTIPLIED_ALPHA)
++            || swapchain->state.desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
++            || swapchain->state.desc.swap_effect == WINED3D_SWAP_EFFECT_SEQUENTIAL)
++    {
++        unsigned int dst_w = dst_rect->right - dst_rect->left;
++        unsigned int dst_h = dst_rect->bottom - dst_rect->top;
++        unsigned int src_w = src_rect->right - src_rect->left;
++        unsigned int src_h = src_rect->bottom - src_rect->top;
++
++        /* Ensure persistent composition buffer exists and is the right size. */
++        if (!swapchain->comp_dc || swapchain->comp_width != dst_w
++                || swapchain->comp_height != dst_h
++                || swapchain->last_blit_window != swapchain->win_handle)
++        {
++            BITMAPINFO bmi;
++
++            if (swapchain->comp_dc)
++            {
++                SelectObject(swapchain->comp_dc, swapchain->comp_old_bitmap);
++                DeleteObject(swapchain->comp_bitmap);
++                DeleteDC(swapchain->comp_dc);
++            }
+ 
+-    if (!StretchBlt(dst_dc, dst_rect->left, dst_rect->top, dst_rect->right - dst_rect->left,
+-            dst_rect->bottom - dst_rect->top, src_dc, src_rect->left, src_rect->top,
+-            src_rect->right - src_rect->left, src_rect->bottom - src_rect->top, SRCCOPY))
+-        ERR("Failed to blit.\n");
++            memset(&bmi, 0, sizeof(bmi));
++            bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
++            bmi.bmiHeader.biWidth = dst_w;
++            bmi.bmiHeader.biHeight = -(int)dst_h; /* top-down */
++            bmi.bmiHeader.biPlanes = 1;
++            bmi.bmiHeader.biBitCount = 32;
++            bmi.bmiHeader.biCompression = BI_RGB;
+ 
+-    ReleaseDC(swapchain->win_handle, dst_dc);
++            if (!(swapchain->comp_dc = CreateCompatibleDC(NULL)))
++            {
++                WARN("Failed to create composition DC.\n");
++                swapchain->comp_bits = NULL;
++                goto done;
++            }
++            if (!(swapchain->comp_bitmap = CreateDIBSection(swapchain->comp_dc, &bmi,
++                    DIB_RGB_COLORS, (void **)&swapchain->comp_bits, NULL, 0)))
++            {
++                WARN("Failed to create composition DIB section.\n");
++                DeleteDC(swapchain->comp_dc);
++                swapchain->comp_dc = NULL;
++                swapchain->comp_bits = NULL;
++                goto done;
++            }
++            if (!(swapchain->comp_old_bitmap = SelectObject(swapchain->comp_dc, swapchain->comp_bitmap)))
++            {
++                WARN("Failed to select composition bitmap into DC.\n");
++                DeleteObject(swapchain->comp_bitmap);
++                swapchain->comp_bitmap = NULL;
++                DeleteDC(swapchain->comp_dc);
++                swapchain->comp_dc = NULL;
++                swapchain->comp_bits = NULL;
++                goto done;
++            }
++            swapchain->comp_width = dst_w;
++            swapchain->comp_height = dst_h;
++            swapchain->last_blit_window = swapchain->win_handle;
++
++            /* Allocate/resize per-visual surface buffer BEFORE copying into it.
++             * Must happen before the memcpy below to avoid buffer overflow when
++             * the new comp buffer is larger than the old surface_bits allocation. */
++            if (!swapchain->surface_bits || swapchain->surface_width != dst_w
++                    || swapchain->surface_height != dst_h)
++            {
++                HeapFree(GetProcessHeap(), 0, swapchain->surface_bits);
++                swapchain->surface_bits = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
++                        dst_w * dst_h * sizeof(DWORD));
++                swapchain->surface_width = dst_w;
++                swapchain->surface_height = dst_h;
++                swapchain->surface_valid = FALSE;
++            }
++
++            /* No content guess on recreate: copying the full backbuffer pulls
++             * stale frames after a resize or window switch (flip buffers still
++             * hold the previous window's frame — FL Studio tab-stale), and
++             * stretching the present's src_rect over the whole buffer distorts
++             * dirty-rect presents (issue 88 resize).  The DIB is
++             * zero-initialized; the regular dirty-/full-present paths below
++             * fill it from this present's actual content. */
++        }
++        if (swapchain->cs_present_dirty_rect_count > 0)
++        {
++            /* Dirty rects: accumulate only changed regions into comp buffer.
++             * Use alpha-aware copy to preserve existing content under transparent
++             * areas — DComp plugins Clear(transparent) every frame and only redraw
++             * changed elements, relying on the compositor to preserve the rest. */
++            unsigned int i;
++            BOOL is_full_frame = FALSE;
++            BOOL use_alpha_copy = swapchain->comp_bits && src_w == dst_w
++                    && src_h == dst_h && format->byte_count == 4;
++
++            if (use_alpha_copy)
++                GdiFlush();
++
++            for (i = 0; i < swapchain->cs_present_dirty_rect_count; ++i)
++            {
++                const RECT *dr = &swapchain->cs_present_dirty_rects[i];
++                int sx = dr->left;
++                int sy = dr->top;
++                int sw = dr->right - dr->left;
++                int sh = dr->bottom - dr->top;
++                int dx = src_w ? sx * (int)dst_w / (int)src_w : sx;
++                int dy = src_h ? sy * (int)dst_h / (int)src_h : sy;
++                int dw = src_w ? sw * (int)dst_w / (int)src_w : sw;
++                int dh = src_h ? sh * (int)dst_h / (int)src_h : sh;
++
++                if (sx == 0 && sy == 0 && (unsigned int)sw >= src_w && (unsigned int)sh >= src_h)
++                    is_full_frame = TRUE;
++
++                if (use_alpha_copy)
++                {
++                    /* Write to per-visual surface_bits if available. Clamp the
++                     * dirty rect to both the source (backbuffer) and the target
++                     * buffer bounds before comp_buffer_alpha_copy's raw memcpy:
++                     * present_dirty_rects come from the app via Present1 and are
++                     * only count-clamped upstream (wined3d_swapchain_set_dirty_rects),
++                     * never coordinate-clamped, so a rect larger than the surface
++                     * or with a negative origin would read past the backbuffer and
++                     * write past the comp/surface buffer. */
++                    DWORD *target = swapchain->surface_bits ? swapchain->surface_bits : swapchain->comp_bits;
++                    unsigned int stride = swapchain->surface_bits ? swapchain->surface_width * 4 : swapchain->comp_width * 4;
++                    int tgt_w = swapchain->surface_bits ? (int)swapchain->surface_width : (int)swapchain->comp_width;
++                    int tgt_h = swapchain->surface_bits ? (int)swapchain->surface_height : (int)swapchain->comp_height;
++                    int csx = sx, csy = sy, cdx = dx, cdy = dy, cw = dw, ch = dh;
++
++                    /* Trim negative origins, advancing the paired origin by the
++                     * overshoot so src/dst columns stay aligned. */
++                    if (csx < 0) { cw += csx; cdx -= csx; csx = 0; }
++                    if (cdx < 0) { cw += cdx; csx -= cdx; cdx = 0; }
++                    if (csy < 0) { ch += csy; cdy -= csy; csy = 0; }
++                    if (cdy < 0) { ch += cdy; csy -= cdy; cdy = 0; }
++
++                    /* Trim extent against source (src_w/src_h) and target bounds. */
++                    if (csx + cw > (int)src_w) cw = (int)src_w - csx;
++                    if (cdx + cw > tgt_w)      cw = tgt_w - cdx;
++                    if (csy + ch > (int)src_h) ch = (int)src_h - csy;
++                    if (cdy + ch > tgt_h)      ch = tgt_h - cdy;
++
++                    /* Skip degenerate rects (fully clipped or inverted). */
++                    if (cw > 0 && ch > 0)
++                        comp_buffer_alpha_copy(target, stride,
++                                back_buffer->resource.heap_memory, row_pitch,
++                                cdx, cdy, csx, csy, cw, ch);
++                }
++                else
++                {
++                    StretchBlt(swapchain->comp_dc, dx, dy, dw, dh,
++                            src_dc, sx, sy, sw, sh, SRCCOPY);
++                }
++            }
++            {
++                static unsigned int dirty_blit_count;
++                ++dirty_blit_count;
++                if (dirty_blit_count <= 10 || !(dirty_blit_count % 500))
++                {
++                    const RECT *dr0 = &swapchain->cs_present_dirty_rects[0];
++                    TRACE("Dirty blit #%u: win %p, %u rects, r0=(%ld,%ld)-(%ld,%ld) %s, buf=%ux%u.\n",
++                            dirty_blit_count, swapchain->win_handle,
++                            swapchain->cs_present_dirty_rect_count,
++                            dr0->left, dr0->top, dr0->right, dr0->bottom,
++                            is_full_frame ? "FULL-FRAME" : "partial",
++                            src_w, src_h);
++                }
++                /* Log all rects for multi-rect blits (> 2 rects = likely UI change, not cursor blink). */
++                if (swapchain->cs_present_dirty_rect_count > 2
++                        && (dirty_blit_count <= 50 || !(dirty_blit_count % 100)))
++                {
++                    unsigned int j;
++                    LONG union_l = LONG_MAX, union_t = LONG_MAX, union_r = 0, union_b = 0;
++                    unsigned long total_area = 0;
++                    for (j = 0; j < swapchain->cs_present_dirty_rect_count; ++j)
++                    {
++                        const RECT *r = &swapchain->cs_present_dirty_rects[j];
++                        if (r->left < union_l) union_l = r->left;
++                        if (r->top < union_t) union_t = r->top;
++                        if (r->right > union_r) union_r = r->right;
++                        if (r->bottom > union_b) union_b = r->bottom;
++                        total_area += (unsigned long)(r->right - r->left) * (r->bottom - r->top);
++                        TRACE("  r[%u]=(%ld,%ld)-(%ld,%ld) %ldx%ld\n",
++                                j, r->left, r->top, r->right, r->bottom,
++                                r->right - r->left, r->bottom - r->top);
++                    }
++                    TRACE("  union=(%ld,%ld)-(%ld,%ld) area=%lu/%lu (%.0f%%)\n",
++                            union_l, union_t, union_r, union_b,
++                            total_area, (unsigned long)src_w * src_h,
++                            100.0 * total_area / ((unsigned long)src_w * src_h));
++                }
++            }
++            /* Ensure surface_bits has latest root visual data after dirty-rect update. */
++            if (swapchain->surface_bits && swapchain->comp_bits)
++            {
++                if (!use_alpha_copy)
++                {
++                    /* StretchBlt wrote to comp_dc — sync back to surface_bits. */
++                    GdiFlush();
++                    memcpy(swapchain->surface_bits, swapchain->comp_bits,
++                            swapchain->surface_width * swapchain->surface_height * sizeof(DWORD));
++                }
++                swapchain->surface_valid = TRUE;
++            }
++        }
++        else
++        {
++            /* No dirty rects (Present without Present1, or timer-triggered).
++             * Do a full blit from backbuffer to comp buffer so that any
++             * D3D11/D2D1 rendering since the last Present becomes visible.
++             * This is the composition-swapchain equivalent of a
++             * full-window present. */
++            BOOL use_alpha_merge = (swapchain->state.desc.swap_effect == WINED3D_SWAP_EFFECT_SEQUENTIAL)
++                    && !(swapchain->state.desc.flags & WINED3D_SWAPCHAIN_PREMULTIPLIED_ALPHA)
++                    && swapchain->comp_bits && swapchain->surface_bits
++                    && src_w == dst_w && src_h == dst_h
++                    && format->byte_count == 4;
++
++            if (use_alpha_merge)
++            {
++                /* SEQUENTIAL swapchain without dirty rects: the app (JUCE/Serum2)
++                 * calls Clear(transparent) every frame and only redraws dirty
++                 * elements. Merge only non-transparent pixels into surface_bits
++                 * so that the previous frame content is preserved where the app
++                 * cleared to transparent. Phase 3 will copy surface_bits to
++                 * comp_bits for the final BitBlt to the window. */
++                GdiFlush();
++                comp_buffer_alpha_merge(swapchain->surface_bits, swapchain->surface_width * 4,
++                        back_buffer->resource.heap_memory, row_pitch,
++                        dst_w, dst_h);
++                swapchain->surface_valid = TRUE;
++            }
++            else
++            {
++                StretchBlt(swapchain->comp_dc, 0, 0, dst_w, dst_h,
++                        src_dc, src_rect->left, src_rect->top, src_w, src_h, SRCCOPY);
++                if (swapchain->surface_bits && swapchain->comp_bits)
++                {
++                    GdiFlush();
++                    memcpy(swapchain->surface_bits, swapchain->comp_bits,
++                            dst_w * dst_h * sizeof(DWORD));
++                    swapchain->surface_valid = TRUE;
++                }
++            }
++        }
++
++        /* Phase 3 Compositor: rebuild comp_bits from clean root surface_bits,
++         * then composite child visuals on top. */
++        if (!GetPropW(swapchain->win_handle, L"__wine_dcomp_is_child"))
++        {
++            if (swapchain->surface_valid && swapchain->surface_bits && swapchain->comp_bits)
++            {
++                GdiFlush();
++                memcpy(swapchain->comp_bits, swapchain->surface_bits,
++                        swapchain->surface_width * swapchain->surface_height * sizeof(DWORD));
++            }
++            swapchain_composite_children(swapchain, dst_w, dst_h);
++        }
++
++        /* Child visuals: only update comp buffer, skip window blit.
++         * The root visual reads our comp_bits directly. */
++        if (GetPropW(swapchain->win_handle, L"__wine_dcomp_is_child"))
++        {
++            /* Child visuals: only update comp buffer, skip window blit. */
++        }
++        else if ((dst_dc = GetDCEx(swapchain->win_handle, 0, DCX_USESTYLE | DCX_CACHE)))
++        {
++            /* Always BitBlt full comp buffer to window — survives any surface reset. */
++            if (!BitBlt(dst_dc, dst_rect->left, dst_rect->top, dst_w, dst_h,
++                    swapchain->comp_dc, 0, 0, SRCCOPY))
++                WARN("Failed to blit composition buffer to window.\n");
++            ReleaseDC(swapchain->win_handle, dst_dc);
++        }
++        else
++        {
++            WARN("Failed to get destination DC.\n");
++        }
++
++        /* Store comp_dc as window property so WM_PAINT can re-blit. Don't
++         * publish a partially-initialized composition state via props. */
++        if (!SetPropW(swapchain->win_handle, L"__wine_dcomp_comp_dc", (HANDLE)swapchain->comp_dc))
++            WARN("Failed to set __wine_dcomp_comp_dc property.\n");
++        {
++            /* Store dimensions as a single LPARAM-sized value. */
++            LPARAM dims = MAKELPARAM(dst_w, dst_h);
++            if (!SetPropW(swapchain->win_handle, L"__wine_dcomp_comp_size", (HANDLE)dims))
++                WARN("Failed to set __wine_dcomp_comp_size property.\n");
++        }
++        /* Expose surface_bits so root can composite per-visual layers. */
++        if (!SetPropW(swapchain->win_handle, L"__wine_dcomp_comp_bits",
++                (HANDLE)(swapchain->surface_bits ? swapchain->surface_bits : swapchain->comp_bits)))
++            WARN("Failed to set __wine_dcomp_comp_bits property.\n");
++
++        swapchain->cs_present_dirty_rect_count = 0;
++    }
++    else
++    {
++        if (!(dst_dc = GetDCEx(swapchain->win_handle, 0, DCX_USESTYLE | DCX_CACHE)))
++        {
++            ERR("Failed to get destination DC.\n");
++        }
++        else
++        {
++            if (!StretchBlt(dst_dc, dst_rect->left, dst_rect->top,
++                    dst_rect->right - dst_rect->left, dst_rect->bottom - dst_rect->top,
++                    src_dc, src_rect->left, src_rect->top,
++                    src_rect->right - src_rect->left, src_rect->bottom - src_rect->top, SRCCOPY))
++                ERR("Failed to blit.\n");
++            ReleaseDC(swapchain->win_handle, dst_dc);
++        }
++    }
++
++    /* Suppress spurious WM_PAINT after writing to the window surface. */
++    ValidateRect(swapchain->win_handle, NULL);
++
++done:
+     destroy_desc.hDc = src_dc;
+     destroy_desc.hBitmap = bitmap;
+     if ((status = D3DKMTDestroyDCFromMemory(&destroy_desc)))
+@@ -600,10 +1201,35 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
+ 
+     TRACE("Presenting DC %p.\n", context_gl->dc);
+ 
+-    pixel_format = &wined3d_adapter_gl(swapchain->device->adapter)->pixel_formats[context_gl->pixel_format];
+-    if (context_gl->dc == wined3d_device_gl(swapchain->device)->backup_dc
++    pixel_format = &wined3d_adapter_gl(swapchain->device->adapter)->pixel_formats[context_gl->pixel_format - 1];
++
++    /* PREFER_GL_PRESENT overrides FLIP_SEQUENTIAL/SEQUENTIAL/partial checks
++     * for top-level popup windows with a GL-capable X11 drawable.  The GL
++     * context must have successfully bound (not backup_dc) and FORCE_GDI
++     * must not be set.  This eliminates the GPU readback + CPU copies that
++     * the GDI present path requires (~5-10ms per frame). */
++    if ((swapchain->state.desc.flags & WINED3D_SWAPCHAIN_PREFER_GL_PRESENT)
++            && !(swapchain->state.desc.flags & WINED3D_SWAPCHAIN_FORCE_GDI_PRESENT)
++            && context_gl->dc != wined3d_device_gl(swapchain->device)->backup_dc)
++    {
++        static unsigned int gl_present_count;
++        gl_info = context_gl->gl_info;
++
++        if (!(gl_present_count++ % 60))
++            TRACE("GL popup present #%u: dc %p, win %p.\n",
++                    gl_present_count, context_gl->dc, swapchain->win_handle);
++
++        swapchain_gl_set_swap_interval(swapchain, context_gl, swap_interval);
++        wined3d_texture_load_location(back_buffer, 0, context, back_buffer->resource.draw_binding);
++        swapchain_blit(swapchain, context, src_rect, dst_rect);
++        gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc);
++    }
++    else if (context_gl->dc == wined3d_device_gl(swapchain->device)->backup_dc
++            || (swapchain->state.desc.flags & WINED3D_SWAPCHAIN_FORCE_GDI_PRESENT)
+             || (pixel_format->swap_method != WGL_SWAP_COPY_ARB
+-            && swapchain_present_is_partial_copy(swapchain, dst_rect)))
++            && swapchain_present_is_partial_copy(swapchain, dst_rect))
++            || swapchain->state.desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
++            || swapchain->state.desc.swap_effect == WINED3D_SWAP_EFFECT_SEQUENTIAL)
+     {
+         swapchain_blit_gdi(swapchain, context, src_rect, dst_rect);
+     }
+@@ -627,6 +1253,7 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
+         gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc);
+     }
+ 
++
+     if (context->d3d_info->fences)
+         wined3d_context_gl_submit_command_fence(context_gl);
+ 
+diff --git a/dlls/wined3d/texture.c b/dlls/wined3d/texture.c
+index 5061f003..e14b4aa6 100644
+--- a/dlls/wined3d/texture.c
++++ b/dlls/wined3d/texture.c
+@@ -335,7 +335,7 @@ static bool fbo_blitter_supported(enum wined3d_blit_op blit_op, const struct win
+ /* Blit between surface locations. Onscreen on different swapchains is not supported.
+  * Depth / stencil is not supported. Context activation is done by the caller. */
+ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_context *context,
+-        enum wined3d_texture_filter_type filter, struct wined3d_texture *src_texture,
++        enum wined3d_blit_op blit_op, enum wined3d_texture_filter_type filter, struct wined3d_texture *src_texture,
+         unsigned int src_sub_resource_idx, DWORD src_location, const RECT *src_rect,
+         struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx, DWORD dst_location,
+         const RECT *dst_rect, const struct wined3d_format *resolve_format)
+@@ -361,6 +361,16 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
+             && (abs(src_rect->bottom - src_rect->top) != abs(dst_rect->bottom - dst_rect->top)
+             || abs(src_rect->right - src_rect->left) != abs(dst_rect->right - dst_rect->left));
+ 
++    if (resolve && blit_op == WINED3D_BLIT_OP_COLOR_BLIT)
++    {
++        if ((scaled_resolve && !context->d3d_info->scaled_resolve)
++                || src_texture->resource.format->id != dst_texture->resource.format->id)
++        {
++            src_location = WINED3D_LOCATION_RB_RESOLVED;
++            resolve = scaled_resolve = false;
++        }
++    }
++
+     if (filter == WINED3D_TEXF_LINEAR)
+         gl_filter = scaled_resolve ? GL_SCALED_RESOLVE_NICEST_EXT : GL_LINEAR;
+     else
+@@ -2928,7 +2938,7 @@ static BOOL wined3d_texture_load_renderbuffer(struct wined3d_texture *texture,
+     else /* texture2d_blt_fbo() will load the source location if necessary. */
+         src_location = WINED3D_LOCATION_TEXTURE_RGB;
+ 
+-    texture2d_blt_fbo(texture->resource.device, context, WINED3D_TEXF_POINT, texture,
++    texture2d_blt_fbo(texture->resource.device, context, WINED3D_BLIT_OP_COLOR_BLIT, WINED3D_TEXF_POINT, texture,
+             sub_resource_idx, src_location, &rect, texture, sub_resource_idx, dst_location, &rect, NULL);
+ 
+     return TRUE;
+@@ -2964,11 +2974,11 @@ static BOOL wined3d_texture_gl_load_texture(struct wined3d_texture_gl *texture_g
+ 
+         SetRect(&src_rect, src_box.left, src_box.top, src_box.right, src_box.bottom);
+         if (srgb)
+-            texture2d_blt_fbo(device, &context_gl->c, WINED3D_TEXF_POINT,
++            texture2d_blt_fbo(device, &context_gl->c, WINED3D_BLIT_OP_COLOR_BLIT, WINED3D_TEXF_POINT,
+                     &texture_gl->t, sub_resource_idx, WINED3D_LOCATION_TEXTURE_RGB, &src_rect,
+                     &texture_gl->t, sub_resource_idx, WINED3D_LOCATION_TEXTURE_SRGB, &src_rect, NULL);
+         else
+-            texture2d_blt_fbo(device, &context_gl->c, WINED3D_TEXF_POINT,
++            texture2d_blt_fbo(device, &context_gl->c, WINED3D_BLIT_OP_COLOR_BLIT, WINED3D_TEXF_POINT,
+                     &texture_gl->t, sub_resource_idx, WINED3D_LOCATION_TEXTURE_SRGB, &src_rect,
+                     &texture_gl->t, sub_resource_idx, WINED3D_LOCATION_TEXTURE_RGB, &src_rect, NULL);
+ 
+@@ -2986,7 +2996,8 @@ static BOOL wined3d_texture_gl_load_texture(struct wined3d_texture_gl *texture_g
+         dst_location = srgb ? WINED3D_LOCATION_TEXTURE_SRGB : WINED3D_LOCATION_TEXTURE_RGB;
+         if (fbo_blitter_supported(WINED3D_BLIT_OP_COLOR_BLIT, gl_info,
+                 &texture_gl->t.resource, src_location, &texture_gl->t.resource, dst_location))
+-            texture2d_blt_fbo(device, &context_gl->c, WINED3D_TEXF_POINT, &texture_gl->t, sub_resource_idx,
++            texture2d_blt_fbo(device, &context_gl->c, WINED3D_BLIT_OP_COLOR_BLIT,
++                    WINED3D_TEXF_POINT, &texture_gl->t, sub_resource_idx,
+                     src_location, &src_rect, &texture_gl->t, sub_resource_idx, dst_location, &src_rect, NULL);
+ 
+         return TRUE;
+@@ -6046,7 +6057,7 @@ static DWORD fbo_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
+     if (blit_op == WINED3D_BLIT_OP_COLOR_BLIT)
+     {
+         TRACE("Colour blit.\n");
+-        texture2d_blt_fbo(device, context, filter, src_texture, src_sub_resource_idx, src_location,
++        texture2d_blt_fbo(device, context, blit_op, filter, src_texture, src_sub_resource_idx, src_location,
+                 src_rect, dst_texture, dst_sub_resource_idx, dst_location, dst_rect, resolve_format);
+         return dst_location;
+     }
+@@ -6575,6 +6586,27 @@ static void vk_blitter_clear(struct wined3d_blitter *blitter, struct wined3d_dev
+             clear_rects, draw_rect, next_flags, colour, depth, stencil);
+ }
+ 
++static bool vk_blitter_conversion_supported(enum wined3d_blit_op op, const struct wined3d_format *src_format,
++        const struct wined3d_format *dst_format, const struct wined3d_format *resolve_format)
++{
++    if (op == WINED3D_BLIT_OP_RAW_BLIT)
++        return true;
++
++    if (wined3d_format_is_typeless(src_format) || wined3d_format_is_typeless(dst_format))
++        return true;
++
++    if (resolve_format)
++        return true;
++
++    if (!((src_format->attrs | dst_format->attrs) & WINED3D_FORMAT_ATTR_INTEGER))
++        return true;
++
++    if ((src_format->attrs & WINED3D_FORMAT_ATTR_UNSIGNED) == (dst_format->attrs & WINED3D_FORMAT_ATTR_UNSIGNED))
++        return true;
++
++    return false;
++}
++
+ static bool vk_blitter_blit_supported(enum wined3d_blit_op op, const struct wined3d_context *context,
+         const struct wined3d_resource *src_resource, const RECT *src_rect,
+         const struct wined3d_resource *dst_resource, const RECT *dst_rect, const struct wined3d_format *resolve_format)
+@@ -6633,16 +6665,20 @@ static bool vk_blitter_blit_supported(enum wined3d_blit_op op, const struct wine
+         return false;
+     }
+ 
+-    if ((src_rect->right - src_rect->left != dst_rect->right - dst_rect->left)
+-            || (src_rect->bottom - src_rect->top != dst_rect->bottom - dst_rect->top))
+-    {
+-        TRACE("Scaling not supported.\n");
+-        return false;
+-    }
+-
+     return true;
+ }
+ 
++static bool use_raw_blit(enum wined3d_blit_op op, const struct wined3d_format_vk *src_format_vk,
++        const struct wined3d_format_vk *dst_format_vk, const RECT *src_rect, const RECT *dst_rect)
++{
++    if (op == WINED3D_BLIT_OP_RAW_BLIT)
++        return true;
++
++    return src_format_vk->vk_format == dst_format_vk->vk_format
++            && src_rect->right - src_rect->left == dst_rect->right - dst_rect->left
++            && src_rect->bottom - src_rect->top == dst_rect->bottom - dst_rect->top;
++}
++
+ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_op op,
+         struct wined3d_context *context, struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx,
+         DWORD src_location, const RECT *src_rect, struct wined3d_texture *dst_texture,
+@@ -6652,6 +6688,8 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
+ {
+     struct wined3d_texture_vk *src_texture_vk = wined3d_texture_vk(src_texture);
+     struct wined3d_texture_vk *dst_texture_vk = wined3d_texture_vk(dst_texture);
++    const struct wined3d_format_vk *src_format_vk = wined3d_format_vk(src_texture->resource.format);
++    const struct wined3d_format_vk *dst_format_vk = wined3d_format_vk(dst_texture->resource.format);
+     struct wined3d_context_vk *context_vk = wined3d_context_vk(context);
+     const struct wined3d_vk_info *vk_info = context_vk->vk_info;
+     VkImageSubresourceRange vk_src_range, vk_dst_range;
+@@ -6739,8 +6777,6 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
+ 
+     if (resolve)
+     {
+-        const struct wined3d_format_vk *src_format_vk = wined3d_format_vk(src_texture->resource.format);
+-        const struct wined3d_format_vk *dst_format_vk = wined3d_format_vk(dst_texture->resource.format);
+         const unsigned int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                 | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+         VkImageLayout resolve_src_layout, resolve_dst_layout;
+@@ -6935,7 +6971,7 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
+                     dst_texture_vk->image.vk_image, dst_layout, 1, &copy_region));
+         }
+     }
+-    else
++    else if (use_raw_blit(op, src_format_vk, dst_format_vk, src_rect, dst_rect))
+     {
+         VkImageCopy region;
+ 
+@@ -6960,6 +6996,34 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
+         VK_CALL(vkCmdCopyImage(vk_command_buffer, src_texture_vk->image.vk_image, src_layout,
+                 dst_texture_vk->image.vk_image, dst_layout, 1, &region));
+     }
++    else
++    {
++        VkImageBlit region;
++
++        region.srcSubresource.aspectMask = vk_src_range.aspectMask;
++        region.srcSubresource.mipLevel = vk_src_range.baseMipLevel;
++        region.srcSubresource.baseArrayLayer = vk_src_range.baseArrayLayer;
++        region.srcSubresource.layerCount = vk_src_range.layerCount;
++        region.srcOffsets[0].x = src_rect->left;
++        region.srcOffsets[0].y = src_rect->top;
++        region.srcOffsets[0].z = 0;
++        region.srcOffsets[1].x = src_rect->right;
++        region.srcOffsets[1].y = src_rect->bottom;
++        region.srcOffsets[1].z = 1;
++        region.dstSubresource.aspectMask = vk_dst_range.aspectMask;
++        region.dstSubresource.mipLevel = vk_dst_range.baseMipLevel;
++        region.dstSubresource.baseArrayLayer = vk_dst_range.baseArrayLayer;
++        region.dstSubresource.layerCount = vk_dst_range.layerCount;
++        region.dstOffsets[0].x = dst_rect->left;
++        region.dstOffsets[0].y = dst_rect->top;
++        region.dstOffsets[0].z = 0;
++        region.dstOffsets[1].x = dst_rect->right;
++        region.dstOffsets[1].y = dst_rect->bottom;
++        region.dstOffsets[1].z = 1;
++
++        VK_CALL(vkCmdBlitImage(vk_command_buffer, src_texture_vk->image.vk_image, src_layout,
++                dst_texture_vk->image.vk_image, dst_layout, 1, &region, vk_filter_from_wined3d(filter)));
++    }
+ 
+     wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
+             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+diff --git a/dlls/wined3d/utils.c b/dlls/wined3d/utils.c
+index dea43836..cc108069 100644
+--- a/dlls/wined3d/utils.c
++++ b/dlls/wined3d/utils.c
+@@ -2054,6 +2054,8 @@ static void parse_channel_desc(struct wined3d_format *format, const char *channe
+             attrs |= WINED3D_FORMAT_ATTR_NORMALISED;
+         if (channel_type == WINED3D_CHANNEL_TYPE_UINT || channel_type == WINED3D_CHANNEL_TYPE_SINT)
+             attrs |= WINED3D_FORMAT_ATTR_INTEGER;
++        if (channel_type == WINED3D_CHANNEL_TYPE_UINT || channel_type == WINED3D_CHANNEL_TYPE_UNORM)
++            attrs |= WINED3D_FORMAT_ATTR_UNSIGNED;
+         if (channel_type == WINED3D_CHANNEL_TYPE_FLOAT)
+             attrs |= WINED3D_FORMAT_ATTR_FLOAT;
+         if (channel_type != WINED3D_CHANNEL_TYPE_UNUSED)
+diff --git a/dlls/wined3d/wined3d.spec b/dlls/wined3d/wined3d.spec
+index 151bcaf9..404e2662 100644
+--- a/dlls/wined3d/wined3d.spec
++++ b/dlls/wined3d/wined3d.spec
+@@ -127,7 +127,7 @@
+ @ cdecl wined3d_device_context_issue_query(ptr ptr long)
+ @ cdecl wined3d_device_context_map(ptr ptr long ptr ptr long)
+ @ cdecl wined3d_device_context_reset_state(ptr)
+-@ cdecl wined3d_device_context_resolve_sub_resource(ptr ptr long ptr long long)
++@ cdecl wined3d_device_context_resolve_sub_resource(ptr ptr long ptr long long long)
+ @ cdecl wined3d_device_context_set_blend_state(ptr ptr ptr long)
+ @ cdecl wined3d_device_context_set_constant_buffers(ptr long long long ptr)
+ @ cdecl wined3d_device_context_set_depth_stencil_state(ptr ptr long)
+@@ -296,6 +296,11 @@
+ @ cdecl wined3d_swapchain_set_gamma_ramp(ptr long ptr)
+ @ cdecl wined3d_swapchain_set_palette(ptr ptr)
+ @ cdecl wined3d_swapchain_set_window(ptr ptr)
++@ cdecl wined3d_swapchain_set_device_window(ptr ptr)
++@ cdecl wined3d_swapchain_set_force_gdi_present(ptr long)
++@ cdecl wined3d_swapchain_set_prefer_gl_present(ptr long)
++@ cdecl wined3d_swapchain_set_dirty_rects(ptr ptr long)
++@ cdecl wined3d_swapchain_set_premultiplied_alpha(ptr long)
+ 
+ @ cdecl wined3d_swapchain_state_create(ptr ptr ptr ptr ptr)
+ @ cdecl wined3d_swapchain_state_destroy(ptr)
+diff --git a/dlls/wined3d/wined3d_gl.h b/dlls/wined3d/wined3d_gl.h
+index 24d7ebf6..b9e4b569 100644
+--- a/dlls/wined3d/wined3d_gl.h
++++ b/dlls/wined3d/wined3d_gl.h
+@@ -722,6 +722,12 @@ void wined3d_context_gl_alloc_timestamp_query(struct wined3d_context_gl *context
+         struct wined3d_timestamp_query *query);
+ GLuint wined3d_context_gl_allocate_vram_chunk_buffer(struct wined3d_context_gl *context_gl,
+         unsigned int pool, size_t size);
++
++BOOL wined3d_context_gl_push_free_bo(struct wined3d_context_gl *context_gl,
++        const struct wined3d_bo_gl *bo);
++BOOL wined3d_context_gl_pop_free_bo(struct wined3d_context_gl *context_gl,
++        GLsizeiptr size, GLenum binding, GLenum usage, bool coherent, GLbitfield flags,
++        struct wined3d_bo_gl *bo);
+ void wined3d_context_gl_apply_blit_state(struct wined3d_context_gl *context_gl, const struct wined3d_device *device);
+ BOOL wined3d_context_gl_apply_clear_state(struct wined3d_context_gl *context_gl, const struct wined3d_state *state,
+         unsigned int rt_count, const struct wined3d_fb_state *fb);
+@@ -799,6 +805,7 @@ struct wined3d_adapter_gl
+ 
+     struct wined3d_gl_info gl_info;
+ 
++    /* Indexed by the WGL pixel format index minus 1. */
+     struct wined3d_pixel_format *pixel_formats;
+     unsigned int pixel_format_count;
+ };
+@@ -842,6 +849,26 @@ struct wined3d_dummy_textures
+     GLuint tex_2d_ms_array;
+ };
+ 
++#define WINED3D_BO_FREE_LIST_MAX 256
++
++/* Upper bound on retired allocator blocks pending fence completion. When
++ * exceeded, fence completion is forced to drain the list, bounding RSS at
++ * the cost of occasional GPU stalls. Without this, a widened fence gap can
++ * cause unbounded accumulation (each retired block pins its 64 MiB chunk).
++ * See issue 46. */
++#define WINED3D_RETIRED_BLOCKS_MAX 4096
++
++struct wined3d_retired_bo_gl
++{
++    GLuint id;
++    GLsizeiptr size;
++    GLenum binding;
++    GLenum usage;
++    GLbitfield flags;
++    bool coherent;
++    uint64_t fence_id;
++};
++
+ struct wined3d_device_gl
+ {
+     struct wined3d_device d;
+@@ -863,6 +890,10 @@ struct wined3d_device_gl
+     SIZE_T retired_blocks_size;
+     SIZE_T retired_block_count;
+ 
++    struct wined3d_retired_bo_gl *bo_free_list;
++    SIZE_T bo_free_list_size;
++    SIZE_T bo_free_list_count;
++
+     HWND backup_wnd;
+     HDC backup_dc;
+ };
+diff --git a/dlls/wined3d/wined3d_main.c b/dlls/wined3d/wined3d_main.c
+index 8d6cb419..1e92322d 100644
+--- a/dlls/wined3d/wined3d_main.c
++++ b/dlls/wined3d/wined3d_main.c
+@@ -103,6 +103,11 @@ static CRITICAL_SECTION_DEBUG wined3d_wndproc_cs_debug =
+ };
+ static CRITICAL_SECTION wined3d_wndproc_cs = {&wined3d_wndproc_cs_debug, -1, 0, 0, 0, 0};
+ 
++/* Private heap for wined3d — avoids ntdll process heap fragmentation from
++ * high-frequency alloc/free cycles (GL buffer structs, staging buffers).
++ * Created at DLL_PROCESS_ATTACH, destroyed at DLL_PROCESS_DETACH. */
++HANDLE wined3d_heap;
++
+ CRITICAL_SECTION wined3d_command_cs;
+ static CRITICAL_SECTION_DEBUG wined3d_command_cs_debug =
+ {
+@@ -283,6 +288,16 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
+     unsigned int tmpvalue;
+     WNDCLASSA wc;
+ 
++    /* Issue 3: route wined3d allocations to the process heap instead of a private
++     * heap (a3f6c08). The private heap and the process heap recycle the same
++     * virtual address regions under wined3d's render-path alloc/free churn; an
++     * application pointer (e.g. KORG Trinity's waveform buffer, allocated via its
++     * CRT on the process heap) then ends up in a block owned by the other heap.
++     * Wine's strict HeapReAlloc returns NULL where Windows tolerates the mismatch,
++     * and the app's unchecked realloc result faults. A single shared owner removes
++     * the cross-heap mismatch. */
++    wined3d_heap = GetProcessHeap();
++
+     wined3d_context_tls_idx = TlsAlloc();
+     if (wined3d_context_tls_idx == TLS_OUT_OF_INDEXES)
+     {
+@@ -535,6 +550,10 @@ static BOOL wined3d_dll_destroy(HINSTANCE hInstDLL)
+ 
+     DeleteCriticalSection(&wined3d_wndproc_cs);
+     DeleteCriticalSection(&wined3d_cs);
++
++    /* Issue 3: wined3d_heap aliases the process heap (see wined3d_dll_init), so it
++     * must not be destroyed here — that would tear down the whole process. */
++
+     return TRUE;
+ }
+ 
+diff --git a/dlls/wined3d/wined3d_private.h b/dlls/wined3d/wined3d_private.h
+index 63a2f19a..b44b2af0 100644
+--- a/dlls/wined3d/wined3d_private.h
++++ b/dlls/wined3d/wined3d_private.h
+@@ -51,6 +51,40 @@
+ #include "wine/list.h"
+ #include "wine/rbtree.h"
+ 
++/* Private heap for wined3d — isolates high-frequency alloc/free churn from
++ * the process heap to prevent RSS growth from ntdll heap fragmentation.
++ * HeapDestroy at DLL_PROCESS_DETACH returns all memory to the OS at once. */
++extern HANDLE wined3d_heap;
++
++static inline void *wined3d_private_alloc(size_t size)
++{
++    return HeapAlloc(wined3d_heap, 0, size);
++}
++
++static inline void *wined3d_private_calloc(size_t count, size_t size)
++{
++    if (size && count > (~(size_t)0) / size)
++        return NULL;
++    return HeapAlloc(wined3d_heap, HEAP_ZERO_MEMORY, count * size);
++}
++
++static inline void *wined3d_private_realloc(void *ptr, size_t size)
++{
++    if (!ptr) return HeapAlloc(wined3d_heap, 0, size);
++    return HeapReAlloc(wined3d_heap, 0, ptr, size);
++}
++
++static inline void wined3d_private_free(void *ptr)
++{
++    if (ptr) HeapFree(wined3d_heap, 0, ptr);
++}
++
++/* Redirect standard C allocators to wined3d private heap */
++#define malloc(s)       wined3d_private_alloc(s)
++#define calloc(c, s)    wined3d_private_calloc(c, s)
++#define realloc(p, s)   wined3d_private_realloc(p, s)
++#define free(p)         wined3d_private_free(p)
++
+ static inline size_t align(size_t addr, size_t alignment)
+ {
+     return (addr + (alignment - 1)) & ~(alignment - 1);
+@@ -2083,7 +2117,6 @@ extern const struct wined3d_light WINED3D_default_light;
+ 
+ struct wined3d_pixel_format
+ {
+-    int iPixelFormat; /* WGL pixel format */
+     int iPixelType; /* WGL pixel type e.g. WGL_TYPE_RGBA_ARB, WGL_TYPE_RGBA_FLOAT_ARB or WGL_TYPE_COLORINDEX_ARB */
+     int redSize, greenSize, blueSize, alphaSize, colorSize;
+     int depthSize, stencilSize;
+@@ -2321,6 +2354,7 @@ enum wined3d_pci_device
+     CARD_NVIDIA_GEFORCE_RTX3080     = 0x2206,
+     CARD_NVIDIA_TESLA_T4            = 0x1eb8,
+     CARD_NVIDIA_AMPERE_A10          = 0x2236,
++    CARD_NVIDIA_AMPERE_A10G         = 0x2237,
+ 
+     CARD_REDHAT_VIRGL               = 0x1010,
+ 
+@@ -3038,6 +3072,13 @@ struct wined3d_device
+     UINT context_count;
+ 
+     CRITICAL_SECTION bo_map_lock;
++
++    /* Pool of freed wined3d_bo_gl structs for recycling.
++     * Reduces malloc/free churn from Map(WRITE_DISCARD).
++     * Protected by bo_map_lock. */
++    struct wined3d_bo *bo_gl_free_pool;
++    SIZE_T bo_gl_free_pool_count;
++#define WINED3D_BO_GL_FREE_POOL_MAX 256
+ };
+ 
+ void wined3d_device_cleanup(struct wined3d_device *device);
+@@ -4034,6 +4075,33 @@ struct wined3d_swapchain
+ 
+     struct wined3d_swapchain_state state;
+     HWND win_handle;
++
++    /* DComp dirty rect tracking for Present1.
++     * present_dirty_rects[] is the client-side "pending" buffer written by
++     * wined3d_swapchain_set_dirty_rects on the app thread.  It is snapshotted
++     * into the present CS op at emit time and must NOT be read on the CS thread
++     * (the app may already be writing the next frame's rects).  The CS-thread
++     * present path reads cs_present_dirty_rects[] instead, which is filled from
++     * the op in wined3d_cs_exec_present and only ever touched on the CS thread. */
++    RECT present_dirty_rects[16];
++    unsigned int present_dirty_rect_count;
++    RECT cs_present_dirty_rects[16];
++    unsigned int cs_present_dirty_rect_count;
++    HWND last_blit_window;
++
++    /* DComp composition buffer (persistent, for dirty-rect accumulation) */
++    HDC comp_dc;
++    HBITMAP comp_bitmap;
++    HGDIOBJ comp_old_bitmap;
++    DWORD *comp_bits;
++    unsigned int comp_width;
++    unsigned int comp_height;
++
++    /* Per-visual surface buffer (persistent, separate from comp_buffer) */
++    DWORD *surface_bits;
++    unsigned int surface_width;
++    unsigned int surface_height;
++    BOOL surface_valid;
+ };
+ 
+ void wined3d_swapchain_activate(struct wined3d_swapchain *swapchain, BOOL activate);
+@@ -4449,6 +4517,7 @@ extern enum wined3d_format_id pixelformat_for_depth(DWORD depth);
+ #define WINED3D_FORMAT_ATTR_HEIGHT_SCALE            0x00000200
+ #define WINED3D_FORMAT_ATTR_MAPPABLE                0x00000400
+ #define WINED3D_FORMAT_ATTR_CAST_TO_BLOCK           0x00000800
++#define WINED3D_FORMAT_ATTR_UNSIGNED                0x00004000
+ 
+ /* Pixel format capabilities */
+ #define WINED3D_FORMAT_CAP_POSTPIXELSHADER_BLENDING     0x00000001
+diff --git a/dlls/wined3d/wined3d_vk.h b/dlls/wined3d/wined3d_vk.h
+index a9f535fa..f005faf2 100644
+--- a/dlls/wined3d/wined3d_vk.h
++++ b/dlls/wined3d/wined3d_vk.h
+@@ -279,6 +279,7 @@ static const VkAccessFlags WINED3D_READ_ONLY_ACCESS_FLAGS = VK_ACCESS_INDIRECT_C
+ 
+ VkAccessFlags vk_access_mask_from_bind_flags(uint32_t bind_flags);
+ VkCompareOp vk_compare_op_from_wined3d(enum wined3d_cmp_func op);
++VkFilter vk_filter_from_wined3d(enum wined3d_texture_filter_type f);
+ VkImageViewType vk_image_view_type_from_wined3d(enum wined3d_resource_type type, uint32_t flags);
+ VkPipelineStageFlags vk_pipeline_stage_mask_from_bind_flags(uint32_t bind_flags);
+ VkShaderStageFlagBits vk_shader_stage_from_wined3d(enum wined3d_shader_type shader_type);
+diff --git a/include/wine/wined3d.h b/include/wine/wined3d.h
+index 9a1fc0d8..47414038 100644
+--- a/include/wine/wined3d.h
++++ b/include/wine/wined3d.h
+@@ -903,6 +903,9 @@ enum wined3d_memory_segment_group
+ #define WINED3D_SWAPCHAIN_NO_WINDOW_CHANGES                     0x00040000u
+ #define WINED3D_SWAPCHAIN_RESTORE_WINDOW_STATE                  0x00080000u
+ #define WINED3D_SWAPCHAIN_REGISTER_TOPMOST_TIMER                0x00100000u
++#define WINED3D_SWAPCHAIN_FORCE_GDI_PRESENT                     0x00200000u
++#define WINED3D_SWAPCHAIN_PREMULTIPLIED_ALPHA                   0x00400000u
++#define WINED3D_SWAPCHAIN_PREFER_GL_PRESENT                     0x00800000u
+ 
+ #define WINED3DDP_MAXTEXCOORD                                   8
+ 
+@@ -2512,7 +2515,8 @@ HRESULT __cdecl wined3d_device_context_map(struct wined3d_device_context *contex
+ void __cdecl wined3d_device_context_reset_state(struct wined3d_device_context *context);
+ void __cdecl wined3d_device_context_resolve_sub_resource(struct wined3d_device_context *context,
+         struct wined3d_resource *dst_resource, unsigned int dst_sub_resource_idx,
+-        struct wined3d_resource *src_resource, unsigned int src_sub_resource_idx, enum wined3d_format_id format_id);
++        struct wined3d_resource *src_resource, unsigned int src_sub_resource_idx,
++        uint32_t flags, enum wined3d_format_id format_id);
+ void __cdecl wined3d_device_context_set_blend_state(struct wined3d_device_context *context,
+         struct wined3d_blend_state *state, const struct wined3d_color *blend_factor, unsigned int sample_mask);
+ void __cdecl wined3d_device_context_set_constant_buffers(struct wined3d_device_context *context,
+@@ -2866,6 +2870,12 @@ HRESULT __cdecl wined3d_swapchain_set_gamma_ramp(const struct wined3d_swapchain
+         uint32_t flags, const struct wined3d_gamma_ramp *ramp);
+ void __cdecl wined3d_swapchain_set_palette(struct wined3d_swapchain *swapchain, struct wined3d_palette *palette);
+ void __cdecl wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, HWND window);
++void __cdecl wined3d_swapchain_set_device_window(struct wined3d_swapchain *swapchain, HWND window);
++void __cdecl wined3d_swapchain_set_force_gdi_present(struct wined3d_swapchain *swapchain, BOOL force);
++void __cdecl wined3d_swapchain_set_prefer_gl_present(struct wined3d_swapchain *swapchain, BOOL prefer);
++void __cdecl wined3d_swapchain_set_dirty_rects(struct wined3d_swapchain *swapchain,
++        const RECT *rects, unsigned int count);
++void __cdecl wined3d_swapchain_set_premultiplied_alpha(struct wined3d_swapchain *swapchain, BOOL premultiplied);
+ 
+ HRESULT __cdecl wined3d_swapchain_state_create(const struct wined3d_swapchain_desc *desc,
+         HWND window, struct wined3d *wined3d, struct wined3d_swapchain_state_parent *state_parent,

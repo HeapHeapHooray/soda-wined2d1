@@ -1,0 +1,365 @@
+diff --git a/dlls/dwrite/analyzer.c b/dlls/dwrite/analyzer.c
+index c25f4484..071fd5f5 100644
+--- a/dlls/dwrite/analyzer.c
++++ b/dlls/dwrite/analyzer.c
+@@ -295,6 +295,9 @@ system_fallback_config[] =
+     { "1C00-1C4F",              L"Noto Sans Lepcha" },
+     { "1C50-1C7F",              L"Noto Sans Ol Chiki" },
+ 
++    /* Miscellaneous Symbols and Arrows - 2B00-2BFF (includes U+2B50 star) */
++    { "2B00-2BFF",              L"Noto Sans Symbols2, Noto Sans Symbols 2, Symbola, FreeSans" },
++
+     { "2C80-2CFF",              L"Noto Sans Coptic" },
+     { "2D30-2D7F",              L"Noto Sans Tifinagh" },
+ 
+@@ -410,6 +413,12 @@ static void text_source_get_u32_char(struct text_source_context *context)
+     available = context->chunk_length - context->cursor;
+     text = context->text + context->cursor;
+ 
++    if (!text || !available)
++    {
++        context->ch = 0;
++        return;
++    }
++
+     if (available > 1 && IS_HIGH_SURROGATE(*text) && IS_LOW_SURROGATE(*(text + 1)))
+     {
+         context->cursor += 2;
+@@ -418,6 +427,11 @@ static void text_source_get_u32_char(struct text_source_context *context)
+         return;
+     }
+ 
++    if (!text)
++    {
++        context->ch = 0;
++        return;
++    }
+     context->cursor++;
+     context->consumed++;
+     context->ch = *text;
+@@ -517,14 +531,14 @@ static HRESULT fallback_locale_add_mapping(struct fallback_locale *locale, size_
+ 
+ /* TODO: potentially needs improvement to consider partially matching locale names. */
+ static struct fallback_locale * font_fallback_get_locale(const struct list *locales,
+-        const WCHAR *locale_name)
++        const WCHAR *locale_name, bool use_neutral)
+ {
+     struct fallback_locale *locale, *neutral = NULL;
+ 
+     LIST_FOR_EACH_ENTRY(locale, locales, struct fallback_locale, entry)
+     {
+         if (!wcsicmp(locale->name, locale_name)) return locale;
+-        if (!*locale->name) neutral = locale;
++        if (use_neutral && !*locale->name) neutral = locale;
+     }
+ 
+     return neutral;
+@@ -617,7 +631,7 @@ static const struct fallback_mapping * find_fallback_mapping(const struct fallba
+     /* Mapping wasn't found for specific locale, try with neutral one. This will only recurse once. */
+     if (*locale->name)
+     {
+-        locale = font_fallback_get_locale(&fallback->locales, L"");
++        locale = font_fallback_get_locale(&fallback->locales, L"", true);
+         mapping = find_fallback_mapping(fallback, locale, ch);
+     }
+ 
+@@ -2432,7 +2446,7 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
+     if (!locale_name) locale_name = L"";
+ 
+     /* Lookup locale entry once, if specific locale is missing neutral one will be returned. */
+-    locale = font_fallback_get_locale(&data->locales, locale_name);
++    locale = font_fallback_get_locale(&data->locales, locale_name, true);
+ 
+     if (FAILED(hr = text_source_context_init(&context, source, position, length))) return hr;
+ 
+@@ -2460,14 +2474,13 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
+         if (SUCCEEDED(create_matching_font(mapping->collection ? mapping->collection : fallback->systemcollection,
+                 mapping->families[i], weight, style, stretch, &IID_IDWriteFont3, (void **)&font)))
+         {
+-            if (!(mapped = fallback_font_get_supported_length(font, source, position, mapped)))
++            if (!(*ret_length = fallback_font_get_supported_length(font, source, position, mapped)))
+             {
+                 IDWriteFont3_Release(font);
+                 continue;
+             }
+ 
+             *ret_font = (IDWriteFont *)font;
+-            *ret_length = mapped;
+             *scale = mapping->scale;
+ 
+             return S_OK;
+@@ -2671,7 +2684,7 @@ static struct fallback_locale * fallback_builder_add_locale(struct dwrite_fontfa
+     struct fallback_locale *locale;
+ 
+     if (!locale_name) locale_name = L"";
+-    if ((locale = font_fallback_get_locale(&builder->data.locales, locale_name))) return locale;
++    if ((locale = font_fallback_get_locale(&builder->data.locales, locale_name, false))) return locale;
+     if (!(locale = calloc(1, sizeof(*locale)))) return NULL;
+     lstrcpynW(locale->name, locale_name, ARRAY_SIZE(locale->name));
+     list_add_tail(&builder->data.locales, &locale->entry);
+diff --git a/dlls/dwrite/dwrite_private.h b/dlls/dwrite/dwrite_private.h
+index b200ce58..c85c7420 100644
+--- a/dlls/dwrite/dwrite_private.h
++++ b/dlls/dwrite/dwrite_private.h
+@@ -27,6 +27,53 @@
+ #include "wine/list.h"
+ #include "wine/rbtree.h"
+ 
++#ifdef __WINE_PE_BUILD
++/* Private heap for dwrite — isolates high-frequency alloc/free churn
++ * (glyph run analysis, layout objects, font cache entries) from the
++ * process heap to reduce RSS growth from ntdll heap fragmentation. */
++extern HANDLE dwrite_heap;
++
++static inline void *dwrite_private_alloc(size_t size)
++{
++    return HeapAlloc(dwrite_heap, 0, size);
++}
++
++static inline void *dwrite_private_calloc(size_t count, size_t size)
++{
++    if (size && count > (~(size_t)0) / size)
++        return NULL;
++    return HeapAlloc(dwrite_heap, HEAP_ZERO_MEMORY, count * size);
++}
++
++static inline void *dwrite_private_realloc(void *ptr, size_t size)
++{
++    if (!ptr) return HeapAlloc(dwrite_heap, 0, size);
++    return HeapReAlloc(dwrite_heap, 0, ptr, size);
++}
++
++static inline void dwrite_private_free(void *ptr)
++{
++    if (ptr) HeapFree(dwrite_heap, 0, ptr);
++}
++
++static inline WCHAR *dwrite_private_wcsdup(const WCHAR *src)
++{
++    size_t bytes;
++    WCHAR *dst;
++    if (!src) return NULL;
++    bytes = (wcslen(src) + 1) * sizeof(WCHAR);
++    if (!(dst = HeapAlloc(dwrite_heap, 0, bytes))) return NULL;
++    memcpy(dst, src, bytes);
++    return dst;
++}
++
++#define malloc(s)       dwrite_private_alloc(s)
++#define calloc(c, s)    dwrite_private_calloc(c, s)
++#define realloc(p, s)   dwrite_private_realloc(p, s)
++#define free(p)         dwrite_private_free(p)
++#define wcsdup(s)       dwrite_private_wcsdup(s)
++#endif /* __WINE_PE_BUILD */
++
+ #define MS_GSUB_TAG DWRITE_MAKE_OPENTYPE_TAG('G','S','U','B')
+ #define MS_GPOS_TAG DWRITE_MAKE_OPENTYPE_TAG('G','P','O','S')
+ 
+diff --git a/dlls/dwrite/font.c b/dlls/dwrite/font.c
+index b3424423..4e3c19a9 100644
+--- a/dlls/dwrite/font.c
++++ b/dlls/dwrite/font.c
+@@ -6415,11 +6415,19 @@ HRESULT create_glyphrunanalysis(const struct glyphrunanalysis_desc *desc, IDWrit
+     *ret = NULL;
+ 
+     /* Check rendering, antialiasing, measuring, and grid fitting modes. */
+-    if ((UINT32)desc->rendering_mode >= DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED ||
++    if ((UINT32)desc->rendering_mode > DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED ||
+             desc->rendering_mode == DWRITE_RENDERING_MODE1_OUTLINE ||
+             desc->rendering_mode == DWRITE_RENDERING_MODE1_DEFAULT)
+         return E_INVALIDARG;
+ 
++    /* NATURAL_SYMMETRIC_DOWNSAMPLED is not fully supported, treat as NATURAL_SYMMETRIC. */
++    if (desc->rendering_mode == DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED)
++    {
++        struct glyphrunanalysis_desc modified = *desc;
++        modified.rendering_mode = DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC;
++        return create_glyphrunanalysis(&modified, ret);
++    }
++
+     if ((UINT32)desc->aa_mode > DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE)
+         return E_INVALIDARG;
+ 
+@@ -7877,9 +7885,59 @@ static BOOL fontset_entry_is_matching(struct dwrite_fontset_entry *entry, DWRITE
+ static HRESULT WINAPI dwritefontset_GetMatchingFonts_(IDWriteFontSet3 *iface, WCHAR const *family, DWRITE_FONT_WEIGHT weight,
+         DWRITE_FONT_STRETCH stretch,  DWRITE_FONT_STYLE style, IDWriteFontSet **fontset)
+ {
+-    FIXME("%p, %s, %d, %d, %d, %p.\n", iface, debugstr_w(family), weight, stretch, style, fontset);
++    struct dwrite_fontset *set = impl_from_IDWriteFontSet3(iface);
++    struct dwrite_fontset_entry **entries;
++    unsigned int i, matched_count = 0;
++    struct dwrite_fontset *object;
+ 
+-    return E_NOTIMPL;
++    TRACE("%p, %s, %d, %d, %d, %p.\n", iface, debugstr_w(family), weight, stretch, style, fontset);
++
++    if (!family || !fontset)
++        return E_INVALIDARG;
++
++    *fontset = NULL;
++
++    if (!(object = calloc(1, sizeof(*object))))
++        return E_OUTOFMEMORY;
++
++    if (!(entries = calloc(set->count, sizeof(*entries))))
++    {
++        free(object);
++        return E_OUTOFMEMORY;
++    }
++
++    for (i = 0; i < set->count; ++i)
++    {
++        IDWriteLocalizedStrings *name;
++
++        /* Match family name first. */
++        name = fontset_entry_get_property(set->entries[i], DWRITE_FONT_PROPERTY_ID_WIN32_FAMILY_NAME);
++        if (!name)
++            continue;
++        if (!localizedstrings_contains(name, family))
++        {
++            IDWriteLocalizedStrings_Release(name);
++            continue;
++        }
++        IDWriteLocalizedStrings_Release(name);
++
++        /* Include all entries matching the family name. The weight, stretch,
++         * and style parameters are used by the caller for prioritization,
++         * not for strict filtering. */
++        entries[matched_count++] = addref_fontset_entry(set->entries[i]);
++    }
++
++    if (!matched_count)
++    {
++        free(entries);
++        entries = NULL;
++    }
++
++    init_fontset(object, set->factory, entries, matched_count, FALSE);
++
++    *fontset = (IDWriteFontSet *)&object->IDWriteFontSet3_iface;
++
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI dwritefontset_GetMatchingFonts(IDWriteFontSet3 *iface, DWRITE_FONT_PROPERTY const *props, UINT32 count,
+diff --git a/dlls/dwrite/main.c b/dlls/dwrite/main.c
+index 1dc5ae48..2f42d581 100644
+--- a/dlls/dwrite/main.c
++++ b/dlls/dwrite/main.c
+@@ -36,6 +36,7 @@
+ WINE_DEFAULT_DEBUG_CHANNEL(dwrite);
+ 
+ HMODULE dwrite_module = 0;
++HANDLE dwrite_heap;
+ static IDWriteFactory7 *shared_factory;
+ static void release_shared_factory(IDWriteFactory7 *factory);
+ 
+@@ -44,6 +45,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD reason, LPVOID reserved)
+     switch (reason)
+     {
+     case DLL_PROCESS_ATTACH:
++        dwrite_heap = HeapCreate(0, 0, 0);
++        if (!dwrite_heap) return FALSE;
+         dwrite_module = hinstDLL;
+         DisableThreadLibraryCalls( hinstDLL );
+         if (!__wine_init_unix_call())
+@@ -55,6 +58,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD reason, LPVOID reserved)
+         release_shared_factory(shared_factory);
+         release_system_fallback_data();
+         UNIX_CALL(process_detach, NULL);
++        if (dwrite_heap)
++        {
++            HeapDestroy(dwrite_heap);
++            dwrite_heap = NULL;
++        }
+     }
+     return TRUE;
+ }
+diff --git a/include/dwrite_3.idl b/include/dwrite_3.idl
+index 552fa3e8..398e4a08 100644
+--- a/include/dwrite_3.idl
++++ b/include/dwrite_3.idl
+@@ -186,12 +186,15 @@ typedef enum DWRITE_PAINT_TYPE
+     DWRITE_PAINT_TYPE_COMPOSITE,
+ } DWRITE_PAINT_TYPE;
+ 
++cpp_quote("#ifndef DWRITE_PAINT_FEATURE_LEVEL_DEFINED")
++cpp_quote("#define DWRITE_PAINT_FEATURE_LEVEL_DEFINED")
+ typedef enum DWRITE_PAINT_FEATURE_LEVEL
+ {
+     DWRITE_PAINT_FEATURE_LEVEL_NONE = 0,
+     DWRITE_PAINT_FEATURE_LEVEL_COLR_V0 = 1,
+     DWRITE_PAINT_FEATURE_LEVEL_COLR_V1 = 2,
+ } DWRITE_PAINT_FEATURE_LEVEL;
++cpp_quote("#endif /* DWRITE_PAINT_FEATURE_LEVEL_DEFINED */")
+ 
+ typedef enum DWRITE_PAINT_ATTRIBUTES
+ {
+@@ -1516,3 +1519,67 @@ interface IDWriteFactory7 : IDWriteFactory6
+         [out] IDWriteFontCollection3 **collection
+     );
+ }
++
++[
++    local,
++    object,
++    uuid(ee0a7fb5-def4-4c23-a454-c9c7dc878398)
++]
++interface IDWriteFactory8 : IDWriteFactory7
++{
++    HRESULT TranslateColorGlyphRun(
++        [in] D2D1_POINT_2F origin,
++        [in] DWRITE_GLYPH_RUN const *glyph_run,
++        [in] DWRITE_GLYPH_RUN_DESCRIPTION const *glyph_run_desc,
++        [in] DWRITE_GLYPH_IMAGE_FORMATS image_formats,
++        [in] DWRITE_PAINT_FEATURE_LEVEL feature_level,
++        [in] DWRITE_MEASURING_MODE measuring_mode,
++        [in] DWRITE_MATRIX const *world_and_dpi_transform,
++        [in] UINT32 palette_index,
++        [out] IDWriteColorGlyphRunEnumerator1 **enumerator);
++}
++
++typedef struct DWRITE_BITMAP_DATA_BGRA32
++{
++    UINT32 width;
++    UINT32 height;
++    UINT32 *pixels;
++} DWRITE_BITMAP_DATA_BGRA32;
++
++[
++    local,
++    object,
++    uuid(c553a742-fc01-44da-a66e-b8b9ed6c3995)
++]
++interface IDWriteBitmapRenderTarget2 : IDWriteBitmapRenderTarget1
++{
++    HRESULT GetBitmapData([out] DWRITE_BITMAP_DATA_BGRA32 *bitmap_data);
++}
++
++[
++    local,
++    object,
++    uuid(aeec37db-c337-40f1-8e2a-9a41b167b238)
++]
++interface IDWriteBitmapRenderTarget3 : IDWriteBitmapRenderTarget2
++{
++    DWRITE_PAINT_FEATURE_LEVEL GetPaintFeatureLevel();
++    HRESULT DrawPaintGlyphRun(
++        [in] FLOAT origin_x,
++        [in] FLOAT origin_y,
++        [in] DWRITE_MEASURING_MODE measuring_mode,
++        [in] DWRITE_GLYPH_RUN const *run,
++        [in] DWRITE_GLYPH_IMAGE_FORMATS image_format,
++        [in] COLORREF text_color,
++        [in] UINT32 palette_index,
++        [out] RECT *black_box);
++    HRESULT DrawGlyphRunWithColorSupport(
++        [in] FLOAT origin_x,
++        [in] FLOAT origin_y,
++        [in] DWRITE_MEASURING_MODE measuring_mode,
++        [in] DWRITE_GLYPH_RUN const *run,
++        [in] IDWriteRenderingParams *params,
++        [in] COLORREF text_color,
++        [in] UINT32 palette_index,
++        [out] RECT *black_box);
++}

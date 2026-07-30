@@ -1,0 +1,1738 @@
+diff --git a/dlls/d3d11/Makefile.in b/dlls/d3d11/Makefile.in
+index 27db1f63..edb91813 100644
+--- a/dlls/d3d11/Makefile.in
++++ b/dlls/d3d11/Makefile.in
+@@ -9,6 +9,7 @@ SOURCES = \
+ 	d3d11_main.c \
+ 	decoder.c \
+ 	device.c \
++	fence.c \
+ 	inputlayout.c \
+ 	shader.c \
+ 	state.c \
+diff --git a/dlls/d3d11/d3d11_private.h b/dlls/d3d11/d3d11_private.h
+index 68745e3b..5793657a 100644
+--- a/dlls/d3d11/d3d11_private.h
++++ b/dlls/d3d11/d3d11_private.h
+@@ -516,6 +516,13 @@ struct d3d_query
+ HRESULT d3d_query_create(struct d3d_device *device, const D3D11_QUERY_DESC *desc, BOOL predicate,
+         struct d3d_query **query);
+ struct d3d_query *unsafe_impl_from_ID3D11Query(ID3D11Query *iface);
++
++/* ID3D11Fence, CPU timeline semantics (fence.c) */
++HRESULT d3d11_fence_create(ID3D11Device5 *device, UINT64 initial_value,
++        D3D11_FENCE_FLAG flags, REFIID iid, void **fence);
++HRESULT d3d11_fence_open_shared(HANDLE handle, REFIID iid, void **fence);
++HRESULT d3d11_fence_signal(ID3D11Fence *fence, UINT64 value);
++HRESULT d3d11_fence_wait(ID3D11Fence *fence, UINT64 value);
+ struct d3d_query *unsafe_impl_from_ID3D10Query(ID3D10Query *iface);
+ struct d3d_query *unsafe_impl_from_ID3D11Asynchronous(ID3D11Asynchronous *iface);
+ 
+diff --git a/dlls/d3d11/device.c b/dlls/d3d11/device.c
+index 2c6e4f46..f83e55c2 100644
+--- a/dlls/d3d11/device.c
++++ b/dlls/d3d11/device.c
+@@ -1520,7 +1520,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_ResolveSubresource(ID3D11Devi
+     wined3d_format = wined3dformat_from_dxgi_format(format);
+     wined3d_device_context_resolve_sub_resource(context->wined3d_context,
+             wined3d_dst_resource, dst_subresource_idx,
+-            wined3d_src_resource, src_subresource_idx, wined3d_format);
++            wined3d_src_resource, src_subresource_idx, WINED3D_BLT_RAW, wined3d_format);
+ }
+ 
+ static void STDMETHODCALLTYPE d3d11_device_context_ExecuteCommandList(ID3D11DeviceContext1 *iface,
+@@ -5840,7 +5840,7 @@ static void STDMETHODCALLTYPE d3d10_device_ResolveSubresource(ID3D10Device1 *ifa
+     wined3d_format = wined3dformat_from_dxgi_format(format);
+     wined3d_device_context_resolve_sub_resource(device->immediate_context.wined3d_context,
+             wined3d_dst_resource, dst_subresource_idx,
+-            wined3d_src_resource, src_subresource_idx, wined3d_format);
++            wined3d_src_resource, src_subresource_idx, WINED3D_BLT_RAW, wined3d_format);
+ }
+ 
+ static void STDMETHODCALLTYPE d3d10_device_VSGetConstantBuffers(ID3D10Device1 *iface,
+diff --git a/dlls/d3d11/fence.c b/dlls/d3d11/fence.c
+new file mode 100644
+index 00000000..d9caa0d8
+--- /dev/null
++++ b/dlls/d3d11/fence.c
+@@ -0,0 +1,485 @@
++/*
++ * ID3D11Fence implementation with CPU timeline semantics
++ *
++ * Copyright 2026 Giang Nguyen
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++/* The fence timeline lives entirely on the CPU: ID3D11DeviceContext4::Signal
++ * flushes the wined3d command stream and then advances the completed value
++ * directly, without involving the GPU driver.  This matches how our DComp
++ * composition pipeline consumes fences (CPU-synchronous readback), and is
++ * sufficient for Chromium's D3DSharedFence usage, which only signals after
++ * submitting work and waits before consuming it on another device. */
++
++#include "d3d11_private.h"
++#include "winternl.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(d3d11);
++
++struct d3d11_fence_waiter
++{
++    UINT64 value;
++    HANDLE event;
++};
++
++struct d3d11_fence
++{
++    ID3D11Fence ID3D11Fence_iface;
++    LONG refcount;
++
++    struct wined3d_private_store private_store;
++    ID3D11Device5 *device;
++    D3D11_FENCE_FLAG flags;
++
++    CRITICAL_SECTION cs;
++    UINT64 completed;
++    struct d3d11_fence_waiter *waiters;
++    SIZE_T waiter_count, waiters_size;
++};
++
++/* Process-wide registry backing CreateSharedHandle/OpenSharedFence.  The
++ * returned handle is a plain event object serving as a token; the registry
++ * maps the underlying kernel object back to the fence.  Lookups compare
++ * kernel object identity (NtCompareObjects), so handles duplicated with
++ * DuplicateHandle - which Chromium does for every fence handle - still
++ * resolve.  Sharing therefore works within one process only; entries hold
++ * a reference on the fence and stay registered until process exit. */
++struct d3d11_fence_share
++{
++    HANDLE token;               /* registry-owned event handle */
++    struct d3d11_fence *fence;  /* strong reference */
++};
++
++static struct d3d11_fence_share *fence_shares;
++static SIZE_T fence_share_count, fence_shares_size;
++
++static CRITICAL_SECTION fence_share_cs;
++static CRITICAL_SECTION_DEBUG fence_share_cs_debug =
++{
++    0, 0, &fence_share_cs,
++    {&fence_share_cs_debug.ProcessLocksList, &fence_share_cs_debug.ProcessLocksList},
++      0, 0, {(DWORD_PTR)(__FILE__ ": fence_share_cs")}
++};
++static CRITICAL_SECTION fence_share_cs = {&fence_share_cs_debug, -1, 0, 0, 0, 0};
++
++static BOOL fence_array_reserve(void **elements, SIZE_T *capacity, SIZE_T count, SIZE_T size)
++{
++    SIZE_T max_capacity, new_capacity;
++    void *new_elements;
++
++    if (count <= *capacity)
++        return TRUE;
++
++    max_capacity = ~(SIZE_T)0 / size;
++    if (count > max_capacity)
++        return FALSE;
++
++    new_capacity = max(1, *capacity);
++    while (new_capacity < count && new_capacity <= max_capacity / 2)
++        new_capacity *= 2;
++    if (new_capacity < count)
++        new_capacity = count;
++
++    if (!(new_elements = realloc(*elements, new_capacity * size)))
++        return FALSE;
++
++    *elements = new_elements;
++    *capacity = new_capacity;
++    return TRUE;
++}
++
++static inline struct d3d11_fence *impl_from_ID3D11Fence(ID3D11Fence *iface)
++{
++    return CONTAINING_RECORD(iface, struct d3d11_fence, ID3D11Fence_iface);
++}
++
++static const ID3D11FenceVtbl d3d11_fence_vtbl;
++
++/* Fences reaching Signal/Wait may come from other implementations (e.g.
++ * dcomp's always-signaled GetAvailableFence object), so type-check before
++ * downcasting. */
++static struct d3d11_fence *unsafe_impl_from_ID3D11Fence(ID3D11Fence *iface)
++{
++    if (!iface || iface->lpVtbl != &d3d11_fence_vtbl)
++        return NULL;
++    return impl_from_ID3D11Fence(iface);
++}
++
++static HRESULT STDMETHODCALLTYPE d3d11_fence_QueryInterface(ID3D11Fence *iface, REFIID riid, void **object)
++{
++    TRACE("iface %p, riid %s, object %p.\n", iface, debugstr_guid(riid), object);
++
++    if (IsEqualGUID(riid, &IID_ID3D11Fence)
++            || IsEqualGUID(riid, &IID_ID3D11DeviceChild)
++            || IsEqualGUID(riid, &IID_IUnknown))
++    {
++        ID3D11Fence_AddRef(iface);
++        *object = iface;
++        return S_OK;
++    }
++
++    WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(riid));
++
++    *object = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG STDMETHODCALLTYPE d3d11_fence_AddRef(ID3D11Fence *iface)
++{
++    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
++    ULONG refcount = InterlockedIncrement(&fence->refcount);
++
++    TRACE("%p increasing refcount to %lu.\n", fence, refcount);
++
++    return refcount;
++}
++
++static ULONG STDMETHODCALLTYPE d3d11_fence_Release(ID3D11Fence *iface)
++{
++    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
++    ULONG refcount = InterlockedDecrement(&fence->refcount);
++
++    TRACE("%p decreasing refcount to %lu.\n", fence, refcount);
++
++    if (!refcount)
++    {
++        /* Waiter events belong to their registrars; don't close them. */
++        free(fence->waiters);
++        fence->cs.DebugInfo->Spare[0] = 0;
++        DeleteCriticalSection(&fence->cs);
++        wined3d_private_store_cleanup(&fence->private_store);
++        ID3D11Device5_Release(fence->device);
++        free(fence);
++    }
++
++    return refcount;
++}
++
++static void STDMETHODCALLTYPE d3d11_fence_GetDevice(ID3D11Fence *iface, ID3D11Device **device)
++{
++    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
++
++    TRACE("iface %p, device %p.\n", iface, device);
++
++    *device = (ID3D11Device *)fence->device;
++    ID3D11Device_AddRef(*device);
++}
++
++static HRESULT STDMETHODCALLTYPE d3d11_fence_GetPrivateData(ID3D11Fence *iface,
++        REFGUID guid, UINT *data_size, void *data)
++{
++    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
++
++    TRACE("iface %p, guid %s, data_size %p, data %p.\n", iface, debugstr_guid(guid), data_size, data);
++
++    return d3d_get_private_data(&fence->private_store, guid, data_size, data);
++}
++
++static HRESULT STDMETHODCALLTYPE d3d11_fence_SetPrivateData(ID3D11Fence *iface,
++        REFGUID guid, UINT data_size, const void *data)
++{
++    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
++
++    TRACE("iface %p, guid %s, data_size %u, data %p.\n", iface, debugstr_guid(guid), data_size, data);
++
++    return d3d_set_private_data(&fence->private_store, guid, data_size, data);
++}
++
++static HRESULT STDMETHODCALLTYPE d3d11_fence_SetPrivateDataInterface(ID3D11Fence *iface,
++        REFGUID guid, const IUnknown *data)
++{
++    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
++
++    TRACE("iface %p, guid %s, data %p.\n", iface, debugstr_guid(guid), data);
++
++    return d3d_set_private_data_interface(&fence->private_store, guid, data);
++}
++
++static HRESULT STDMETHODCALLTYPE d3d11_fence_CreateSharedHandle(ID3D11Fence *iface,
++        const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle)
++{
++    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
++    HANDLE token, caller_handle;
++
++    TRACE("iface %p, attributes %p, access %#lx, name %s, handle %p.\n",
++            iface, attributes, access, debugstr_w(name), handle);
++
++    if (!handle)
++        return E_INVALIDARG;
++
++    if (name)
++    {
++        FIXME("Named sharing not supported.\n");
++        return E_NOTIMPL;
++    }
++    if (attributes)
++        FIXME("Ignoring security attributes %p.\n", attributes);
++
++    if (!(fence->flags & D3D11_FENCE_FLAG_SHARED))
++    {
++        WARN("Fence was not created with D3D11_FENCE_FLAG_SHARED.\n");
++        return E_INVALIDARG;
++    }
++
++    if (!(token = CreateEventW(NULL, TRUE, FALSE, NULL)))
++        return E_FAIL;
++
++    if (!DuplicateHandle(GetCurrentProcess(), token, GetCurrentProcess(),
++            &caller_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
++    {
++        CloseHandle(token);
++        return E_FAIL;
++    }
++
++    EnterCriticalSection(&fence_share_cs);
++    if (!fence_array_reserve((void **)&fence_shares, &fence_shares_size,
++            fence_share_count + 1, sizeof(*fence_shares)))
++    {
++        LeaveCriticalSection(&fence_share_cs);
++        CloseHandle(caller_handle);
++        CloseHandle(token);
++        return E_OUTOFMEMORY;
++    }
++    fence_shares[fence_share_count].token = token;
++    fence_shares[fence_share_count].fence = fence;
++    ++fence_share_count;
++    ID3D11Fence_AddRef(iface);
++    LeaveCriticalSection(&fence_share_cs);
++
++    *handle = caller_handle;
++    return S_OK;
++}
++
++static UINT64 STDMETHODCALLTYPE d3d11_fence_GetCompletedValue(ID3D11Fence *iface)
++{
++    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
++    UINT64 completed;
++
++    TRACE("iface %p.\n", iface);
++
++    EnterCriticalSection(&fence->cs);
++    completed = fence->completed;
++    LeaveCriticalSection(&fence->cs);
++
++    return completed;
++}
++
++static HRESULT STDMETHODCALLTYPE d3d11_fence_SetEventOnCompletion(ID3D11Fence *iface,
++        UINT64 value, HANDLE event)
++{
++    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
++
++    TRACE("iface %p, value %s, event %p.\n", iface, wine_dbgstr_longlong(value), event);
++
++    EnterCriticalSection(&fence->cs);
++
++    if (value <= fence->completed)
++    {
++        LeaveCriticalSection(&fence->cs);
++        if (event)
++            SetEvent(event);
++        return S_OK;
++    }
++
++    /* D3D12 semantics: a NULL event with a not yet reached value would busy
++     * wait until the value is reached; our CPU timeline has nothing to spin
++     * on, so simply succeed without registering anything. */
++    if (!event)
++    {
++        LeaveCriticalSection(&fence->cs);
++        return S_OK;
++    }
++
++    if (!fence_array_reserve((void **)&fence->waiters, &fence->waiters_size,
++            fence->waiter_count + 1, sizeof(*fence->waiters)))
++    {
++        LeaveCriticalSection(&fence->cs);
++        return E_OUTOFMEMORY;
++    }
++    fence->waiters[fence->waiter_count].value = value;
++    fence->waiters[fence->waiter_count].event = event;
++    ++fence->waiter_count;
++
++    LeaveCriticalSection(&fence->cs);
++
++    return S_OK;
++}
++
++static const ID3D11FenceVtbl d3d11_fence_vtbl =
++{
++    /* IUnknown methods */
++    d3d11_fence_QueryInterface,
++    d3d11_fence_AddRef,
++    d3d11_fence_Release,
++    /* ID3D11DeviceChild methods */
++    d3d11_fence_GetDevice,
++    d3d11_fence_GetPrivateData,
++    d3d11_fence_SetPrivateData,
++    d3d11_fence_SetPrivateDataInterface,
++    /* ID3D11Fence methods */
++    d3d11_fence_CreateSharedHandle,
++    d3d11_fence_GetCompletedValue,
++    d3d11_fence_SetEventOnCompletion,
++};
++
++HRESULT d3d11_fence_create(ID3D11Device5 *device, UINT64 initial_value,
++        D3D11_FENCE_FLAG flags, REFIID iid, void **fence)
++{
++    struct d3d11_fence *object;
++    HRESULT hr;
++
++    /* Wine's d3d11_3.idl defines D3D11_FENCE_FLAG_NONE as 0x1 (the platform
++     * SDK uses 0), so accept both spellings of "no flags".  Anything else
++     * (SHARED_CROSS_ADAPTER, NON_MONITORED) is rejected. */
++    if (flags & ~(D3D11_FENCE_FLAG_NONE | D3D11_FENCE_FLAG_SHARED))
++    {
++        FIXME("Unsupported flags %#x.\n", flags);
++        return E_INVALIDARG;
++    }
++
++    if (!(object = calloc(1, sizeof(*object))))
++        return E_OUTOFMEMORY;
++
++    object->ID3D11Fence_iface.lpVtbl = &d3d11_fence_vtbl;
++    object->refcount = 1;
++    object->flags = flags;
++    object->completed = initial_value;
++    wined3d_private_store_init(&object->private_store);
++    InitializeCriticalSectionEx(&object->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
++    object->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": d3d11_fence.cs");
++    object->device = device;
++    ID3D11Device5_AddRef(device);
++
++    hr = ID3D11Fence_QueryInterface(&object->ID3D11Fence_iface, iid, fence);
++    ID3D11Fence_Release(&object->ID3D11Fence_iface);
++    return hr;
++}
++
++HRESULT d3d11_fence_open_shared(HANDLE handle, REFIID iid, void **fence)
++{
++    struct d3d11_fence *object = NULL;
++    HRESULT hr;
++    SIZE_T i;
++
++    EnterCriticalSection(&fence_share_cs);
++    for (i = 0; i < fence_share_count; ++i)
++    {
++        if (!NtCompareObjects(fence_shares[i].token, handle))
++        {
++            object = fence_shares[i].fence;
++            break;
++        }
++    }
++    if (object)
++        hr = ID3D11Fence_QueryInterface(&object->ID3D11Fence_iface, iid, fence);
++    LeaveCriticalSection(&fence_share_cs);
++
++    if (!object)
++    {
++        FIXME("Unknown handle %p; cross-process fence sharing is not supported.\n", handle);
++        return E_INVALIDARG;
++    }
++
++    return hr;
++}
++
++/* Advance the timeline and fire due waiters.  Called from
++ * ID3D11DeviceContext4::Signal after the wined3d flush. */
++HRESULT d3d11_fence_signal(ID3D11Fence *iface, UINT64 value)
++{
++    struct d3d11_fence *fence = unsafe_impl_from_ID3D11Fence(iface);
++    SIZE_T i;
++
++    if (!fence)
++    {
++        FIXME("Fence %p was not created by d3d11.\n", iface);
++        return E_INVALIDARG;
++    }
++
++    EnterCriticalSection(&fence->cs);
++
++    if (value > fence->completed)
++        fence->completed = value;
++
++    for (i = 0; i < fence->waiter_count;)
++    {
++        if (fence->waiters[i].value <= fence->completed)
++        {
++            SetEvent(fence->waiters[i].event);
++            fence->waiters[i] = fence->waiters[--fence->waiter_count];
++        }
++        else
++        {
++            ++i;
++        }
++    }
++
++    LeaveCriticalSection(&fence->cs);
++
++    return S_OK;
++}
++
++static void d3d11_fence_unregister_waiter(struct d3d11_fence *fence, UINT64 value, HANDLE event)
++{
++    SIZE_T i;
++
++    EnterCriticalSection(&fence->cs);
++    for (i = 0; i < fence->waiter_count; ++i)
++    {
++        if (fence->waiters[i].event == event && fence->waiters[i].value == value)
++        {
++            fence->waiters[i] = fence->waiters[--fence->waiter_count];
++            break;
++        }
++    }
++    LeaveCriticalSection(&fence->cs);
++}
++
++/* Wait through the public ID3D11Fence interface so that foreign
++ * implementations (e.g. dcomp's always-signaled fence) work too.  The wait
++ * is bounded: our composite pipeline is CPU-synchronous, so a signal that
++ * has not arrived within the timeout is either produced on another thread
++ * (tolerable race) or will never come; blocking indefinitely here would
++ * risk deadlocking the caller's render loop. */
++HRESULT d3d11_fence_wait(ID3D11Fence *iface, UINT64 value)
++{
++    struct d3d11_fence *fence = unsafe_impl_from_ID3D11Fence(iface);
++    HANDLE event;
++    HRESULT hr;
++
++    if (ID3D11Fence_GetCompletedValue(iface) >= value)
++        return S_OK;
++
++    if (!(event = CreateEventW(NULL, TRUE, FALSE, NULL)))
++        return E_FAIL;
++
++    if (SUCCEEDED(hr = ID3D11Fence_SetEventOnCompletion(iface, value, event)))
++    {
++        if (WaitForSingleObject(event, 100) == WAIT_TIMEOUT)
++            WARN("Timed out waiting for fence %p, value %s, completed %s.\n", iface,
++                    wine_dbgstr_longlong(value),
++                    wine_dbgstr_longlong(ID3D11Fence_GetCompletedValue(iface)));
++    }
++
++    /* Drop the registration (if still pending) before the event handle
++     * becomes invalid. */
++    if (fence)
++        d3d11_fence_unregister_waiter(fence, value, event);
++    CloseHandle(event);
++
++    return S_OK;
++}
+diff --git a/dlls/dxgi/adapter.c b/dlls/dxgi/adapter.c
+index 975481d4..4bbfa2a8 100644
+--- a/dlls/dxgi/adapter.c
++++ b/dlls/dxgi/adapter.c
+@@ -354,13 +354,22 @@ static void STDMETHODCALLTYPE dxgi_adapter_UnregisterVideoMemoryBudgetChangeNoti
+ static HRESULT STDMETHODCALLTYPE dxgi_adapter_GetDesc3(IWineDXGIAdapter *iface, DXGI_ADAPTER_DESC3 *desc)
+ {
+     struct dxgi_adapter *adapter = impl_from_IWineDXGIAdapter(iface);
++    HRESULT hr;
+ 
+     TRACE("iface %p, desc %p.\n", iface, desc);
+ 
+     if (!desc)
+         return E_INVALIDARG;
+ 
+-    return dxgi_adapter_get_desc(adapter, desc);
++    if (SUCCEEDED(hr = dxgi_adapter_get_desc(adapter, desc)))
++    {
++        /* d3d11 implements ID3D11Fence with CPU timeline semantics.  Only
++         * the GetDesc3 path may report this: the DXGI_ADAPTER_FLAG used by
++         * GetDesc/GetDesc1/GetDesc2 does not know this flag. */
++        desc->Flags |= DXGI_ADAPTER_FLAG3_SUPPORT_MONITORED_FENCES;
++    }
++
++    return hr;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE dxgi_adapter_get_adapter_info(IWineDXGIAdapter *iface,
+diff --git a/dlls/dxgi/device.c b/dlls/dxgi/device.c
+index dec94250..372b6094 100644
+--- a/dlls/dxgi/device.c
++++ b/dlls/dxgi/device.c
+@@ -468,6 +468,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_swapchain_factory_create_swapchain(IWineDX
+         return hr;
+     }
+ 
++    object->alpha_mode = desc->AlphaMode;
++
+     TRACE("Created swapchain %p.\n", object);
+ 
+     *swapchain = (IDXGISwapChain1 *)&object->IDXGISwapChain4_iface;
+diff --git a/dlls/dxgi/dxgi_private.h b/dlls/dxgi/dxgi_private.h
+index 164bc107..0ca474bc 100644
+--- a/dlls/dxgi/dxgi_private.h
++++ b/dlls/dxgi/dxgi_private.h
+@@ -169,6 +169,16 @@ HRESULT dxgi_adapter_create(struct dxgi_factory *factory, UINT ordinal,
+         struct dxgi_adapter **adapter);
+ struct dxgi_adapter *unsafe_impl_from_IDXGIAdapter(IDXGIAdapter *iface);
+ 
++/* DComp composition reblit timer IDs, shared between factory.c (set/handle)
++ * and swapchain.c (kill on teardown). */
++#define DCOMP_REBLIT_TIMER_ID 0xDC01
++#define DCOMP_POPUP_REBLIT_TIMER_ID 0xDC02
++
++/* Count of currently subclassed DComp target windows (defined in factory.c).
++ * Controls full-vs-popup mode; d3d11_swapchain_Release() decrements it when it
++ * un-subclasses a target on its own UI thread. */
++extern LONG dcomp_subclassed_target_count;
++
+ /* IDXGISwapChain */
+ struct d3d11_swapchain
+ {
+@@ -183,6 +193,14 @@ struct d3d11_swapchain
+     IDXGIOutput *target;
+     LONG present_count;
+     LONG in_set_fullscreen_state;
++    HANDLE frame_latency_event;
++    DXGI_ALPHA_MODE alpha_mode;
++
++    /* DComp composition-swapchain teardown bookkeeping (see d3d11_swapchain_Release).
++     * Each composition swapchain owns one comp_wnd and subclasses at most one
++     * target window (verified 1:1 — every popup gets its own swapchain). */
++    HWND comp_wnd;
++    HWND target_hwnd;
+ };
+ 
+ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
+diff --git a/dlls/dxgi/factory.c b/dlls/dxgi/factory.c
+index ebdb42a3..629ecb47 100644
+--- a/dlls/dxgi/factory.c
++++ b/dlls/dxgi/factory.c
+@@ -378,13 +378,750 @@ static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFa
+     FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
+ }
+ 
++#define WM_WINE_DCOMP_SET_TARGET (WM_USER + 0x100)
++#define WM_WINE_DCOMP_SET_CHILD_MODE (WM_USER + 0x101)
++
++static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGISwapChain4 *iface)
++{
++    return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
++}
++
++/* DCOMP_REBLIT_TIMER_ID / DCOMP_POPUP_REBLIT_TIMER_ID moved to dxgi_private.h
++ * so d3d11_swapchain_Release() can KillTimer them on teardown. */
++
++/* Re-blit composition content from persistent buffer to window.
++ * Called on WM_PAINT, focus changes, timer tick, and other events
++ * that may cause the window surface to be overwritten. */
++static void dcomp_reblit_comp_buffer(HWND hwnd, const char *reason)
++{
++    HDC comp_dc = (HDC)GetPropW(hwnd, L"__wine_dcomp_comp_dc");
++    LPARAM dims = (LPARAM)GetPropW(hwnd, L"__wine_dcomp_comp_size");
++
++    if (comp_dc && dims)
++    {
++        unsigned int w = LOWORD(dims);
++        unsigned int h = HIWORD(dims);
++        HDC hdc = GetDC(hwnd);
++        if (hdc)
++        {
++            static unsigned int reblit_count;
++            ++reblit_count;
++            if (reblit_count <= 5 || !(reblit_count % 200))
++                FIXME("Re-blit #%u: hwnd %p %ux%u reason=%s.\n",
++                        reblit_count, hwnd, w, h, reason);
++            BitBlt(hdc, 0, 0, w, h, comp_dc, 0, 0, SRCCOPY);
++            ReleaseDC(hwnd, hdc);
++        }
++    }
++    else
++    {
++        static unsigned int null_count;
++        ++null_count;
++        if (null_count <= 3)
++            FIXME("Re-blit skipped: hwnd %p comp_dc=%p dims=%#Ix reason=%s.\n",
++                    hwnd, comp_dc, (ULONG_PTR)dims, reason);
++    }
++}
++
++/* Count of currently subclassed DComp target windows.  Used to distinguish
++ * the first (primary) target from secondary targets (popups, tooltips).
++ * Primary target gets full mode (timer + periodic Present), secondary targets
++ * get lightweight popup mode.  Incremented after subclassing, decremented
++ * in WM_NCDESTROY of both wndprocs.  Thread-safe via Interlocked ops. */
++LONG dcomp_subclassed_target_count;
++
++/* Process-wide signal that a DComp plugin GUI is currently hosted, published as
++ * a property on the desktop window so winex11's set_style_hints can read it
++ * (cross-module: dxgi is PE, winex11 is the Unix driver — a shared window
++ * property is the idiomatic channel, same convention as __wine_dcomp_wnd_*).
++ * Embedded in-plugin popups (ownerless WS_POPUP|WS_EX_TOOLWINDOW) anchor to the
++ * host window, not to a DComp swapchain target, so the standalone discriminators
++ * (popup_parent prop / anchor_is_dcomp) miss them and they stay UTILITY
++ * (activatable) → focus war with the plugin's other popups → flicker (Trinity
++ * IFX list, embedded).  This flag lets winex11 mark them DROPDOWN_MENU instead.
++ * Set while count > 0, removed at 0 (SetProp with value 0 is not distinguishable
++ * from "unset" — see the SetPropW (HANDLE)1/2 lesson). */
++static void dcomp_update_active_prop(void)
++{
++    LONG count = dcomp_subclassed_target_count;
++    if (count > 0)
++        SetPropW(GetDesktopWindow(), L"__wine_dcomp_active", (HANDLE)(LONG_PTR)count);
++    else
++        RemovePropW(GetDesktopWindow(), L"__wine_dcomp_active");
++}
++
++/* Popup transient-parent stack: the open DComp targets in open order
++ * [main, settings, dropdown, ...]. A new popup's transient_for anchor is the
++ * current top (the previously-opened target) — yielding the correct nested
++ * hierarchy main <- settings <- dropdown — instead of the unreliable
++ * get_active_window(), which (while the GL-presenting main window reactivates
++ * itself) drags every popup behind the main window (Trinity standalone z-order
++ * regression). Pushed after subclassing, removed in WM_NCDESTROY of both
++ * wndprocs. UI-thread-serialized (the SET_TARGET message and NCDESTROY run on
++ * the window's own thread) → no extra lock, like dcomp_subclassed_target_count.
++ * Global for now (shared across plugins); per-plugin scoping ties into #11. */
++#define DCOMP_POPUP_STACK_MAX 16
++static HWND dcomp_popup_stack[DCOMP_POPUP_STACK_MAX];
++static int dcomp_popup_stack_depth;
++
++static HWND dcomp_popup_stack_top(void)
++{
++    return dcomp_popup_stack_depth > 0 ? dcomp_popup_stack[dcomp_popup_stack_depth - 1] : NULL;
++}
++
++static void dcomp_popup_stack_push(HWND hwnd)
++{
++    if (dcomp_popup_stack_depth < DCOMP_POPUP_STACK_MAX)
++        dcomp_popup_stack[dcomp_popup_stack_depth++] = hwnd;
++    else
++        WARN("DComp popup stack full (%d), not pushing %p.\n", dcomp_popup_stack_depth, hwnd);
++}
++
++static void dcomp_popup_stack_remove(HWND hwnd)
++{
++    int i;
++
++    for (i = 0; i < dcomp_popup_stack_depth; ++i)
++    {
++        if (dcomp_popup_stack[i] == hwnd)
++        {
++            memmove(&dcomp_popup_stack[i], &dcomp_popup_stack[i + 1],
++                    (dcomp_popup_stack_depth - i - 1) * sizeof(*dcomp_popup_stack));
++            --dcomp_popup_stack_depth;
++            return;
++        }
++    }
++}
++
++/* Restore a parent's style if we OR-ed in WS_CLIPCHILDREN for this target
++ * (see WM_WINE_DCOMP_SET_TARGET).  Keyed off the __wine_dcomp_parent_clip prop,
++ * which is set only when we actually added the bit, so a parent that already had
++ * WS_CLIPCHILDREN is left untouched.  Avoids a permanent host-window style change. */
++static void dcomp_restore_parent_clip(HWND hwnd)
++{
++    HWND phwnd = (HWND)GetPropW(hwnd, L"__wine_dcomp_parent_clip");
++
++    if (phwnd)
++    {
++        LONG pstyle = GetWindowLongW(phwnd, GWL_STYLE);
++        if (pstyle & WS_CLIPCHILDREN)
++            SetWindowLongW(phwnd, GWL_STYLE, pstyle & ~WS_CLIPCHILDREN);
++        RemovePropW(hwnd, L"__wine_dcomp_parent_clip");
++    }
++}
++
++/* Lightweight subclass for DComp popup windows (menus, tooltips).
++ * Only blocks WM_ERASEBKGND and re-blits composition content on WM_PAINT.
++ * NO timer, NO periodic Present â avoids dual-swapchain
++ * interference that causes main plugin window to flicker. */
++static LRESULT CALLBACK dcomp_popup_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
++{
++    WNDPROC orig = (WNDPROC)GetPropW(hwnd, L"__wine_dcomp_orig_wndproc");
++
++    switch (msg)
++    {
++        case WM_ERASEBKGND:
++            return 1;
++
++        case WM_PAINT:
++        {
++            PAINTSTRUCT ps;
++            HDC comp_dc = (HDC)GetPropW(hwnd, L"__wine_dcomp_comp_dc");
++            LPARAM dims = (LPARAM)GetPropW(hwnd, L"__wine_dcomp_comp_size");
++
++            BeginPaint(hwnd, &ps);
++            if (comp_dc && dims)
++            {
++                unsigned int w = LOWORD(dims);
++                unsigned int h = HIWORD(dims);
++                BitBlt(ps.hdc, 0, 0, w, h, comp_dc, 0, 0, SRCCOPY);
++            }
++            EndPaint(hwnd, &ps);
++            ValidateRect(hwnd, NULL);
++            return 0;
++        }
++
++        case WM_TIMER:
++            if (wparam == DCOMP_POPUP_REBLIT_TIMER_ID)
++            {
++                /* Lightweight reblit: just BitBlt from comp_dc, no Present,
++                 * no swapchain interaction.  Keeps the window surface fresh
++                 * so Expose events (e.g. tooltip close) show current content
++                 * instead of stale frames. */
++                dcomp_reblit_comp_buffer(hwnd, "popup-timer");
++                return 0;
++            }
++            break;
++
++        case WM_NCDESTROY:
++        {
++            LRESULT result;
++            IDXGISwapChain4 *sc = (IDXGISwapChain4 *)GetPropW(hwnd, L"__wine_dcomp_swapchain");
++
++            InterlockedDecrement(&dcomp_subclassed_target_count);
++            dcomp_update_active_prop();
++            dcomp_popup_stack_remove(hwnd);
++            KillTimer(hwnd, DCOMP_POPUP_REBLIT_TIMER_ID);
++
++            /* Before the popup window is destroyed, switch the swapchain back
++             * to its composition window.  This drains the CS queue (no more
++             * presents to the dead popup), releases the popup's DC, and
++             * rebinds to a valid window.  Without this, the GL context stays
++             * bound to the destroyed popup's drawable → page fault. */
++            if (sc)
++            {
++                struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(sc);
++                WCHAR prop_name[64];
++                HWND comp_wnd;
++
++                /* Window dies first: clear the back-pointer so a later
++                 * d3d11_swapchain_Release won't touch this (recycled) HWND. */
++                swapchain->target_hwnd = NULL;
++
++                swprintf(prop_name, ARRAY_SIZE(prop_name),
++                        L"__wine_dcomp_wnd_%I64x", (UINT_PTR)sc);
++                comp_wnd = (HWND)GetPropW(GetDesktopWindow(), prop_name);
++
++                wined3d_swapchain_set_prefer_gl_present(swapchain->wined3d_swapchain, FALSE);
++                wined3d_swapchain_set_force_gdi_present(swapchain->wined3d_swapchain, TRUE);
++
++                if (comp_wnd && IsWindow(comp_wnd))
++                {
++                    wined3d_swapchain_set_device_window(swapchain->wined3d_swapchain, comp_wnd);
++                    FIXME("DComp popup %p destroyed, switched back to comp_wnd %p.\n",
++                            hwnd, comp_wnd);
++                }
++                else
++                {
++                    FIXME("DComp popup %p destroyed, comp_wnd not found.\n", hwnd);
++                }
++            }
++
++            dcomp_restore_parent_clip(hwnd);
++            result = orig ? CallWindowProcW(orig, hwnd, msg, wparam, lparam)
++                         : DefWindowProcW(hwnd, msg, wparam, lparam);
++            RemovePropW(hwnd, L"__wine_dcomp_orig_wndproc");
++            RemovePropW(hwnd, L"__wine_dcomp_subclass_proc");
++            RemovePropW(hwnd, L"__wine_dcomp_swapchain");
++            RemovePropW(hwnd, L"__wine_dcomp_comp_dc");
++            RemovePropW(hwnd, L"__wine_dcomp_comp_size");
++            return result;
++        }
++    }
++
++    return orig ? CallWindowProcW(orig, hwnd, msg, wparam, lparam)
++                : DefWindowProcW(hwnd, msg, wparam, lparam);
++}
++
++/* Subclass WndProc for composition target windows (plugin's HWND).
++ * Blocks WM_ERASEBKGND and re-blits composition content on events
++ * that can overwrite the window surface (paint, focus, expose).
++ * Uses a periodic timer as fallback since WM_ACTIVATE does not
++ * reach child windows when the top-level parent loses focus. */
++static LRESULT CALLBACK dcomp_target_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
++{
++    WNDPROC orig = (WNDPROC)GetPropW(hwnd, L"__wine_dcomp_orig_wndproc");
++
++    switch (msg)
++    {
++        case WM_ERASEBKGND:
++            return 1;
++
++        case WM_PAINT:
++        {
++            /* Forward WM_PAINT to the app's original wndproc FIRST.  DComp
++             * plugins whose UI is paint-driven (EPROM's WebView2 loader only
++             * re-renders on WM_SIZE/WM_PAINT, not on a timer) otherwise never
++             * get their invalidation callback: hover/click state changes call
++             * InvalidateRect, the generated WM_PAINT was swallowed here, and
++             * the UI stayed frozen until the next resize forced a WM_SIZE
++             * redraw.  The app's paint may trigger a re-render + Present,
++             * which updates the comp buffer as a side effect.  Its own
++             * BeginPaint sends WM_ERASEBKGND, which this subclass still
++             * suppresses (returns 1), so no background erase happens.
++             *
++             * Afterwards re-blit the comp buffer via GetDC (NOT BeginPaint:
++             * the app's EndPaint already validated the update region, so a
++             * second BeginPaint would return an empty clip region and eat
++             * our blit) so the swapchain content stays on top of whatever
++             * the app painted. */
++            if (orig)
++                CallWindowProcW(orig, hwnd, msg, wparam, lparam);
++            else
++                DefWindowProcW(hwnd, msg, wparam, lparam);
++
++            {
++                static unsigned int paint_count;
++                ++paint_count;
++                if (paint_count <= 5 || !(paint_count % 200))
++                    FIXME("WM_PAINT #%u (forwarded): hwnd %p, comp_dc=%p.\n",
++                            paint_count, hwnd,
++                            (HDC)GetPropW(hwnd, L"__wine_dcomp_comp_dc"));
++            }
++            dcomp_reblit_comp_buffer(hwnd, "paint");
++            ValidateRect(hwnd, NULL);
++            return 0;
++        }
++
++        case WM_TIMER:
++            if (wparam == DCOMP_REBLIT_TIMER_ID)
++            {
++                IDXGISwapChain4 *sc = (IDXGISwapChain4 *)GetPropW(hwnd, L"__wine_dcomp_swapchain");
++
++                if (sc)
++                {
++                    /* Present(0,0) without dirty rects.  The expensive GPU
++                     * readback + StretchBlt is skipped in swapchain_blit_gdi
++                     * when the composition buffer is already up-to-date
++                     * (no new rendering since the last Present1).  We still
++                     * call Present so JUCE's SwapChain event loop gets its
++                     * frame-ready signal — without it, input events stall. */
++                    IDXGISwapChain4_Present(sc, 0, 0);
++
++                }
++                else
++                {
++                    dcomp_reblit_comp_buffer(hwnd, "timer");
++                }
++                return 0;
++            }
++            break;
++
++        case WM_WINDOWPOSCHANGED:
++        {
++            const WINDOWPOS *wp = (const WINDOWPOS *)lparam;
++            LRESULT result = orig ? CallWindowProcW(orig, hwnd, msg, wparam, lparam)
++                                  : DefWindowProcW(hwnd, msg, wparam, lparam);
++            /* Only reblit when the window was actually moved, resized, or shown.
++             * Pure Z-order changes (e.g. popup menu appearing above) do not
++             * require a reblit and would compete with Timer Present, causing
++             * visible flickering (Prophecy hamburger menu hover). */
++            if (wp && (!(wp->flags & SWP_NOMOVE) || !(wp->flags & SWP_NOSIZE)
++                    || (wp->flags & SWP_SHOWWINDOW)))
++            {
++                dcomp_reblit_comp_buffer(hwnd, "windowposchanged");
++            }
++            return result;
++        }
++
++        case WM_SHOWWINDOW:
++        case WM_ACTIVATE:
++        case WM_CHILDACTIVATE:
++        case WM_MOUSEACTIVATE:
++        {
++            LRESULT result = orig ? CallWindowProcW(orig, hwnd, msg, wparam, lparam)
++                                  : DefWindowProcW(hwnd, msg, wparam, lparam);
++            dcomp_reblit_comp_buffer(hwnd, msg == WM_ACTIVATE ? "activate" :
++                    msg == WM_SHOWWINDOW ? "showwindow" :
++                    msg == WM_CHILDACTIVATE ? "childactivate" : "mouseactivate");
++            return result;
++        }
++
++        case WM_NCDESTROY:
++        {
++            LRESULT result;
++            IDXGISwapChain4 *sc = (IDXGISwapChain4 *)GetPropW(hwnd, L"__wine_dcomp_swapchain");
++            InterlockedDecrement(&dcomp_subclassed_target_count);
++            dcomp_update_active_prop();
++            dcomp_popup_stack_remove(hwnd);
++            KillTimer(hwnd, DCOMP_REBLIT_TIMER_ID);
++            /* Window dies first: clear the back-pointer so a later
++             * d3d11_swapchain_Release won't touch this (recycled) HWND. */
++            if (sc)
++                d3d11_swapchain_from_IDXGISwapChain4(sc)->target_hwnd = NULL;
++            dcomp_restore_parent_clip(hwnd);
++            result = orig ? CallWindowProcW(orig, hwnd, msg, wparam, lparam)
++                         : DefWindowProcW(hwnd, msg, wparam, lparam);
++            RemovePropW(hwnd, L"__wine_dcomp_orig_wndproc");
++            RemovePropW(hwnd, L"__wine_dcomp_subclass_proc");
++            RemovePropW(hwnd, L"__wine_dcomp_swapchain");
++            RemovePropW(hwnd, L"__wine_dcomp_comp_dc");
++            RemovePropW(hwnd, L"__wine_dcomp_comp_size");
++            return result;
++        }
++    }
++
++    return orig ? CallWindowProcW(orig, hwnd, msg, wparam, lparam)
++                : DefWindowProcW(hwnd, msg, wparam, lparam);
++}
++
++static LRESULT CALLBACK dcomp_swapchain_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
++{
++    switch (msg)
++    {
++        case WM_ERASEBKGND:
++            return 1;
++        case WM_NCHITTEST:
++            return HTTRANSPARENT;
++        case WM_PAINT:
++        {
++            PAINTSTRUCT ps;
++            BeginPaint(hwnd, &ps);
++            EndPaint(hwnd, &ps);
++            return 0;
++        }
++        case WM_WINE_DCOMP_SET_TARGET:
++        {
++            HWND target_hwnd = (HWND)lparam;
++            IDXGISwapChain4 *iface = (IDXGISwapChain4 *)GetPropW(hwnd, L"__wine_dcomp_swapchain");
++            if (iface && target_hwnd)
++            {
++                struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
++                struct wined3d_swapchain_desc wined3d_desc;
++                RECT rc;
++
++                wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
++                {
++                    RECT wr;
++                    HWND phwnd = GetParent(target_hwnd);
++                    GetClientRect(target_hwnd, &rc);
++                    GetWindowRect(target_hwnd, &wr);
++                    FIXME("DComp: target %p client=%ldx%ld screen=(%ld,%ld)-(%ld,%ld)"
++                            " parent=%p sc=%ux%u.\n",
++                            target_hwnd, rc.right, rc.bottom,
++                            wr.left, wr.top, wr.right, wr.bottom,
++                            phwnd, wined3d_desc.backbuffer_width,
++                            wined3d_desc.backbuffer_height);
++                    if (phwnd)
++                    {
++                        RECT pr;
++                        GetWindowRect(phwnd, &pr);
++                        FIXME("DComp: parent %p screen=(%ld,%ld)-(%ld,%ld).\n",
++                                phwnd, pr.left, pr.top, pr.right, pr.bottom);
++                    }
++                }
++
++                /* Switch swapchain device window from comp_wnd to target_hwnd.
++                 * The GL context rebinds lazily via context_gl_update_window.
++                 *
++                 * Top-level popup windows (WS_POPUP, parent == Desktop) have an
++                 * X11 whole_window, so GL can create a client_window drawable and
++                 * use glXSwapBuffers directly — no GPU readback or CPU copies.
++                 * win32u's get_window_unused_drawable() calls p_surface_create
++                 * on-demand when wglMakeCurrent needs a drawable for the popup.
++                 *
++                 * Child windows (embedded plugins) have no whole_window, so GL
++                 * swap would write to an invisible drawable.  Force GDI blit for
++                 * those — it writes to the window surface via comp_dc. */
++                {
++                    HWND target_parent_toplevel = GetAncestor(target_hwnd, GA_PARENT);
++                    BOOL is_toplevel = !target_parent_toplevel
++                            || target_parent_toplevel == GetDesktopWindow();
++
++                    wined3d_swapchain_set_device_window(swapchain->wined3d_swapchain, target_hwnd);
++                    /* Remember the subclassed target for teardown in d3d11_swapchain_Release. */
++                    swapchain->target_hwnd = target_hwnd;
++
++                    if (is_toplevel)
++                    {
++                        wined3d_swapchain_set_force_gdi_present(swapchain->wined3d_swapchain, FALSE);
++                        wined3d_swapchain_set_prefer_gl_present(swapchain->wined3d_swapchain, TRUE);
++                        FIXME("DComp: target %p is top-level, using GL present (no GDI readback).\n",
++                                target_hwnd);
++                    }
++                    else
++                    {
++                        wined3d_swapchain_set_force_gdi_present(swapchain->wined3d_swapchain, TRUE);
++                    }
++                }
++
++                /* Set premultiplied alpha blending if the swapchain uses it.
++                 * This makes GDI blit use AlphaBlend instead of StretchBlt,
++                 * allowing proper compositing of transparent areas. */
++                if (swapchain->alpha_mode == DXGI_ALPHA_MODE_PREMULTIPLIED)
++                    wined3d_swapchain_set_premultiplied_alpha(swapchain->wined3d_swapchain, TRUE);
++
++                /* Chromium binds composition swapchains to its "Intermediate D3D Window"
++                 * (WS_EX_LAYERED|WS_EX_NOREDIRECTIONBITMAP|WS_EX_TRANSPARENT) without ever
++                 * calling SetLayeredWindowAttributes or UpdateLayeredWindow.  On Windows the
++                 * DWM shows the composition visual directly and such a window needs no GDI
++                 * surface at all; here the composition buffer arrives by GDI blit, and an
++                 * unattributed layered window has no working GDI display path (winex11 defers
++                 * mapping layered windows until attributes arrive, and their redraws stay
++                 * suppressed) — presents would execute and never reach the screen.  An opaque
++                 * LWA_ALPHA is a no-op for a NOREDIRECTIONBITMAP window under Windows
++                 * semantics and makes the window an ordinary opaque surface here.  Targets
++                 * that already carry attributes (JUCE's DropShadower, UpdateLayeredWindow
++                 * users) have a working path already and keep their alpha semantics.
++                 *
++                 * From shibco/ableton-linux patch 0041, written by shibco, where it fixes
++                 * Ableton Live's Learn View.  Measured inert for Reaper/FL hosting here —
++                 * Chromium's composition swapchains never reach this bind at all — and kept
++                 * as cover for hosts that do bind them. */
++                {
++                    DWORD target_exstyle = GetWindowLongW(target_hwnd, GWL_EXSTYLE);
++
++                    if ((target_exstyle & WS_EX_NOREDIRECTIONBITMAP)
++                            || ((target_exstyle & WS_EX_LAYERED)
++                                && !GetLayeredWindowAttributes(target_hwnd, NULL, NULL, NULL)))
++                    {
++                        if (SetLayeredWindowAttributes(target_hwnd, 0, 255, LWA_ALPHA))
++                            TRACE("DComp: target %p exstyle %#lx was layered without attributes, "
++                                    "set opaque LWA_ALPHA so composition blits are visible.\n",
++                                    target_hwnd, target_exstyle);
++                        else
++                            WARN("DComp: SetLayeredWindowAttributes failed for target %p, error %lu.\n",
++                                    target_hwnd, GetLastError());
++                    }
++                }
++
++                ShowWindow(hwnd, SW_HIDE);
++
++                /* Detect popup mode via subclassed target count.
++                 * First target (count == 0) gets full mode with timer +
++                 * Present.  Subsequent targets get lightweight popup
++                 * mode to avoid dual-swapchain interference.
++                 *
++                 * NB: this is a deliberate process-global heuristic — "the first
++                 * DComp target created in the process is the plugin's main window,
++                 * later ones are its popups/menus".  It is order-dependent and in
++                 * principle a second unrelated plugin instance could influence the
++                 * mode assignment, but it holds for the embedded single-plugin
++                 * hosting we target and is empirically validated across all tested
++                 * plugins.  A per-target discriminator (e.g. by window style/owner)
++                 * would be less order-sensitive but is render-critical: a main
++                 * window misclassified as a popup loses its present timer.  Do not
++                 * swap the discriminator without a full plugin re-test.  The popup
++                 * *stacking* (transient anchor) is handled separately via the popup
++                 * stack below, not by this count. */
++                {
++                    BOOL is_popup_mode = FALSE;
++                    LONG target_style = GetWindowLongW(target_hwnd, GWL_STYLE);
++                    HWND target_parent = GetParent(target_hwnd);
++                    /* Transient anchor for a new popup = the previously-opened
++                     * target (top of the popup stack). */
++                    HWND popup_parent = dcomp_popup_stack_top();
++
++                    FIXME("DComp popup-detect: target %p style=0x%08lx parent=%p count=%ld.\n",
++                            target_hwnd, (unsigned long)target_style, target_parent,
++                            dcomp_subclassed_target_count);
++
++                    if (dcomp_subclassed_target_count > 0)
++                        is_popup_mode = TRUE;
++
++                    /* Never chain a second subclass onto ourselves.  A resize makes
++                     * the app recreate its composition swapchain, so we land here
++                     * again for a window we already subclassed; SetWindowLongPtrW
++                     * would then hand back our own wndproc and we would store it as
++                     * the "original" one, so CallWindowProcW calls us forever.  The
++                     * WM_NCHITTEST flood of a resize exhausts the 1 MB stack of the
++                     * host's main thread within a few dozen mouse moves and kills
++                     * the process. */
++                    {
++                        WNDPROC installed = (WNDPROC)GetWindowLongPtrW(target_hwnd, GWLP_WNDPROC);
++
++                        /* dcomp subclasses composition targets as well, from another
++                         * DLL, so a pointer comparison against our own procedures
++                         * never recognises it.  Both modules publish the procedure
++                         * they installed in __wine_dcomp_subclass_proc; if that is
++                         * what sits on the window and we have already subclassed it
++                         * once, ours is still in the chain and chaining again would
++                         * close a ring - ours would call dcomp's, which calls the
++                         * procedure it saved (ours) right back (issue 101). */
++                        if (installed == dcomp_popup_wndproc || installed == dcomp_target_wndproc
++                                || (installed
++                                    && installed == (WNDPROC)GetPropW(target_hwnd, L"__wine_dcomp_subclass_proc")
++                                    && GetPropW(target_hwnd, L"__wine_dcomp_orig_wndproc")))
++                        {
++                            FIXME("DComp: target %p already subclassed (wndproc %p), not chaining again.\n",
++                                    target_hwnd, installed);
++                            goto dcomp_subclass_done;
++                        }
++                    }
++
++                    if (is_popup_mode)
++                    {
++                        /* Lightweight popup mode: subclass with minimal wndproc
++                         * (WM_ERASEBKGND + WM_PAINT only), no timer. */
++                        WNDPROC orig = (WNDPROC)SetWindowLongPtrW(target_hwnd, GWLP_WNDPROC,
++                                (LONG_PTR)dcomp_popup_wndproc);
++                        if (orig)
++                        {
++                            SetPropW(target_hwnd, L"__wine_dcomp_orig_wndproc", (HANDLE)orig);
++                            /* Publish what we installed so dcomp recognises the
++                             * subclass as ours (issue 101). */
++                            SetPropW(target_hwnd, L"__wine_dcomp_subclass_proc", (HANDLE)dcomp_popup_wndproc);
++                            SetPropW(target_hwnd, L"__wine_dcomp_swapchain", (HANDLE)iface);
++                            /* Anchor transient_for at the previously-opened target
++                             * (read by winex11 set_style_hints) instead of
++                             * get_active_window → nested hierarchy, no main-window pull. */
++                            SetPropW(target_hwnd, L"__wine_dcomp_popup_parent", (HANDLE)popup_parent);
++                            SetTimer(target_hwnd, DCOMP_POPUP_REBLIT_TIMER_ID, 200, NULL);
++                            InterlockedIncrement(&dcomp_subclassed_target_count);
++                            dcomp_update_active_prop();
++                            dcomp_popup_stack_push(target_hwnd);
++                            FIXME("DComp POPUP mode: target %p, orig wndproc %p, sc=%p, transient->%p (reblit timer 200ms).\n",
++                                    target_hwnd, orig, iface, popup_parent);
++                        }
++                        else
++                        {
++                            FIXME("DComp popup: SetWindowLongPtrW FAILED for target %p, err %lu.\n",
++                                    target_hwnd, GetLastError());
++                        }
++                    }
++                    else
++                    {
++                        /* Full mode: subclass + timer + periodic Present for main window */
++                        WNDPROC orig = (WNDPROC)SetWindowLongPtrW(target_hwnd, GWLP_WNDPROC,
++                                (LONG_PTR)dcomp_target_wndproc);
++                        if (orig)
++                        {
++                            SetPropW(target_hwnd, L"__wine_dcomp_orig_wndproc", (HANDLE)orig);
++                            /* Publish what we installed so dcomp recognises the
++                             * subclass as ours (issue 101). */
++                            SetPropW(target_hwnd, L"__wine_dcomp_subclass_proc", (HANDLE)dcomp_target_wndproc);
++                            SetPropW(target_hwnd, L"__wine_dcomp_swapchain", (HANDLE)iface);
++                            SetTimer(target_hwnd, DCOMP_REBLIT_TIMER_ID, 200, NULL);
++                            InterlockedIncrement(&dcomp_subclassed_target_count);
++                            dcomp_update_active_prop();
++                            /* Main window: stack base for the first popup's transient anchor. */
++                            dcomp_popup_stack_push(target_hwnd);
++                            FIXME("DComp: subclassed target %p, orig wndproc %p, timer started, sc=%p.\n",
++                                    target_hwnd, orig, iface);
++                        }
++                        else
++                        {
++                            FIXME("DComp: SetWindowLongPtrW FAILED for target %p, err %lu.\n",
++                                    target_hwnd, GetLastError());
++                        }
++                    }
++
++dcomp_subclass_done:
++                    ;
++                }
++
++                /* Prevent black flickering between GL presents.  The subclassed
++                 * wndproc already returns 1 for WM_ERASEBKGND on this window, so
++                 * the class background brush is never painted here — no need to
++                 * zero the (class-wide) GCLP_HBRBACKGROUND, which would also hit
++                 * unrelated windows sharing the class.
++                 *
++                 * Make the parent clip this child during its own painting.  Only
++                 * OR in WS_CLIPCHILDREN if the parent did not already have it, and
++                 * record the parent on the target so the style is restored on
++                 * teardown (avoids a permanent host-window style change). */
++                {
++                    HWND phwnd = GetParent(target_hwnd);
++                    if (phwnd)
++                    {
++                        LONG pstyle = GetWindowLongW(phwnd, GWL_STYLE);
++                        if (!(pstyle & WS_CLIPCHILDREN))
++                        {
++                            SetWindowLongW(phwnd, GWL_STYLE, pstyle | WS_CLIPCHILDREN);
++                            SetPropW(target_hwnd, L"__wine_dcomp_parent_clip", (HANDLE)phwnd);
++                        }
++                    }
++                }
++                ValidateRect(target_hwnd, NULL);
++
++                GetClientRect(target_hwnd, &rc);
++                FIXME("DComp: target %p now %ldx%ld, swapchain switched.\n",
++                        target_hwnd, rc.right, rc.bottom);
++            }
++            return 0;
++        }
++
++        case WM_WINE_DCOMP_SET_CHILD_MODE:
++        {
++            IDXGISwapChain4 *iface = (IDXGISwapChain4 *)GetPropW(hwnd, L"__wine_dcomp_swapchain");
++            if (iface)
++            {
++                struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
++
++                /* Enable GDI present so child renders into a comp buffer
++                 * (CreateDIBSection) instead of GL-swapping to the hidden window.
++                 * The root visual reads the child's comp_bits for compositing. */
++                wined3d_swapchain_set_force_gdi_present(swapchain->wined3d_swapchain, TRUE);
++
++                if (swapchain->alpha_mode == DXGI_ALPHA_MODE_PREMULTIPLIED)
++                    wined3d_swapchain_set_premultiplied_alpha(swapchain->wined3d_swapchain, TRUE);
++
++                /* Mark this window as a child visual's comp window */
++                SetPropW(hwnd, L"__wine_dcomp_is_child", (HANDLE)(ULONG_PTR)1);
++
++                FIXME("DComp child mode: hwnd %p, sc %p, alpha_mode %u.\n",
++                        hwnd, iface, swapchain->alpha_mode);
++            }
++            return 0;
++        }
++    }
++    return DefWindowProcW(hwnd, msg, wparam, lparam);
++}
++
++static BOOL dcomp_register_window_class(void)
++{
++    static BOOL registered;
++    WNDCLASSW wc;
++
++    if (registered)
++        return TRUE;
++
++    memset(&wc, 0, sizeof(wc));
++    wc.lpfnWndProc = dcomp_swapchain_wndproc;
++    wc.style = CS_OWNDC;
++    wc.lpszClassName = L"WineDCompSwapchain";
++    wc.hInstance = GetModuleHandleW(NULL);
++
++    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
++    {
++        ERR("Failed to register WineDCompSwapchain class, error %lu.\n", GetLastError());
++        return FALSE;
++    }
++
++    registered = TRUE;
++    return TRUE;
++}
++
+ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
+         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
+ {
+-    FIXME("iface %p, device %p, desc %p, output %p, swapchain %p stub!\n",
++    WCHAR prop_name[64];
++    HWND window;
++    HRESULT hr;
++
++    TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
+             iface, device, desc, output, swapchain);
+ 
+-    return E_NOTIMPL;
++    if (!device || !desc || !swapchain)
++    {
++        WARN("Invalid pointer.\n");
++        return DXGI_ERROR_INVALID_CALL;
++    }
++
++    if (!dcomp_register_window_class())
++        return E_FAIL;
++
++    window = CreateWindowExW(WS_EX_NOPARENTNOTIFY,
++            L"WineDCompSwapchain", L"DComp Swapchain",
++            WS_CHILD, 0, 0, desc->Width, desc->Height,
++            GetDesktopWindow(), NULL, GetModuleHandleW(NULL), NULL);
++    if (!window)
++    {
++        ERR("Failed to create composition window, error %lu.\n", GetLastError());
++        return E_FAIL;
++    }
++
++    hr = dxgi_factory_CreateSwapChainForHwnd(iface, device, window,
++            desc, NULL, output, swapchain);
++    if (SUCCEEDED(hr))
++    {
++        swprintf(prop_name, ARRAY_SIZE(prop_name),
++                L"__wine_dcomp_wnd_%I64x", (UINT_PTR)*swapchain);
++        SetPropW(GetDesktopWindow(), prop_name, (HANDLE)window);
++        /* Store back-reference for WM_WINE_DCOMP_SET_TARGET handler */
++        SetPropW(window, L"__wine_dcomp_swapchain", (HANDLE)*swapchain);
++        /* Remember the composition window for teardown in d3d11_swapchain_Release. */
++        d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)*swapchain)->comp_wnd = window;
++        FIXME("Created composition window %p (%ux%u) for swapchain %p.\n",
++                window, desc->Width, desc->Height, *swapchain);
++    }
++    else
++    {
++        ERR("CreateSwapChainForHwnd failed, hr %#lx.\n", hr);
++        DestroyWindow(window);
++    }
++
++    return hr;
+ }
+ 
+ static UINT STDMETHODCALLTYPE dxgi_factory_GetCreationFlags(IWineDXGIFactory *iface)
+diff --git a/dlls/dxgi/output.c b/dlls/dxgi/output.c
+index e828ed0d..6f911266 100644
+--- a/dlls/dxgi/output.c
++++ b/dlls/dxgi/output.c
+@@ -366,11 +366,10 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_WaitForVBlank(IDXGIOutput6 *iface)
+     static BOOL once = FALSE;
+ 
+     if (!once++)
+-        FIXME("iface %p stub!\n", iface);
+-    else
+-        TRACE("iface %p stub!\n", iface);
++        FIXME("iface %p semi-stub, sleeping 16ms.\n", iface);
+ 
+-    return E_NOTIMPL;
++    Sleep(16);
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE dxgi_output_TakeOwnership(IDXGIOutput6 *iface, IUnknown *device, BOOL exclusive)
+diff --git a/dlls/dxgi/resource.c b/dlls/dxgi/resource.c
+index 0a2fa097..f67ccde3 100644
+--- a/dlls/dxgi/resource.c
++++ b/dlls/dxgi/resource.c
+@@ -220,6 +220,96 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_GetDC(IDXGISurface1 *iface, BOOL d
+     return hr;
+ }
+ 
++/* Surface-to-window blit for standalone DXGI surfaces.
++ * On Windows, DirectComposition composites DXGI surface content into
++ * associated windows automatically. Wine lacks this compositing, so
++ * after an app draws via GetDC/ReleaseDC on a standalone surface (not
++ * a swapchain back buffer), we manually blit to matching popup windows.
++ *
++ * The targeting below is a size-match heuristic (visible WS_POPUP/owned
++ * window whose client area equals the surface) rather than a real
++ * surface->window binding, and it can blit to more than one same-size
++ * popup at once.  This is deliberate and, in practice, the only option:
++ * a proper binding would need the surface to be associated with a window
++ * through the DComp visual tree (IDCompositionVisual::SetContent on a
++ * visual whose target is the popup), but apps that actually hit this path
++ * do not do that.  Investigated for issue 10 (2026-06-19) with KORG Trinity,
++ * standalone and embedded: its popups are composition-swapchain targets and
++ * the GetDC/ReleaseDC surfaces (from IDCompositionSurface::BeginDraw with
++ * IID_IDXGISurface) are never set as visual content, so dcomp has no HWND to
++ * hand us — there is nothing to bind to.  A prototype binding (stamp the
++ * owning HWND onto the surface via SetPrivateData, read it here) was built
++ * and verified to never engage for any tested plugin, so it was dropped in
++ * favour of this documented heuristic.
++ *
++ * Blitting to every same-size popup is safe in the observed cases because
++ * such sibling popups carry identical content (e.g. symmetric scrollbar
++ * troughs).  The over-blit would only be visibly wrong for two same-size
++ * popups holding *different* content drawn from the same surface API; not
++ * observed in practice.  Tightening to a single window is NOT done: the
++ * correct target is always among the matches today, so picking one risks
++ * leaving the right window with stale content. */
++
++struct surface_blit_data
++{
++    HDC src_dc;
++    unsigned int width;
++    unsigned int height;
++    unsigned int blit_count;
++};
++
++static BOOL CALLBACK surface_blit_enum_proc(HWND hwnd, LPARAM lparam)
++{
++    struct surface_blit_data *data = (struct surface_blit_data *)lparam;
++    unsigned int w, h;
++    RECT client;
++    LONG style;
++    HDC dst_dc;
++
++    if (!IsWindowVisible(hwnd))
++        return TRUE;
++
++    /* Only consider popup windows or owned windows — skip main app windows. */
++    style = GetWindowLongW(hwnd, GWL_STYLE);
++    if (!(style & WS_POPUP) && !GetWindow(hwnd, GW_OWNER))
++        return TRUE;
++
++    GetClientRect(hwnd, &client);
++    w = client.right - client.left;
++    h = client.bottom - client.top;
++
++    if (w != data->width || h != data->height || w == 0 || h == 0)
++        return TRUE;
++
++    dst_dc = GetDC(hwnd);
++    if (dst_dc)
++    {
++        BitBlt(dst_dc, 0, 0, w, h, data->src_dc, 0, 0, SRCCOPY);
++        ReleaseDC(hwnd, dst_dc);
++        data->blit_count++;
++        TRACE("Blit DXGI surface %ux%u to popup hwnd %p.\n", w, h, hwnd);
++    }
++
++    return TRUE;
++}
++
++static void dxgi_surface_blit_to_popup_windows(HDC src_dc,
++        unsigned int width, unsigned int height)
++{
++    struct surface_blit_data data;
++
++    data.src_dc = src_dc;
++    data.width = width;
++    data.height = height;
++    data.blit_count = 0;
++
++    EnumWindows(surface_blit_enum_proc, (LPARAM)&data);
++
++    if (data.blit_count)
++        TRACE("Blit DXGI surface %ux%u to %u popup window(s).\n",
++                width, height, data.blit_count);
++}
++
+ static HRESULT STDMETHODCALLTYPE dxgi_surface_ReleaseDC(IDXGISurface1 *iface, RECT *dirty_rect)
+ {
+     struct dxgi_resource *resource = impl_from_IDXGISurface1(iface);
+@@ -227,7 +317,35 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_ReleaseDC(IDXGISurface1 *iface, RE
+ 
+     TRACE("iface %p, rect %s\n", iface, wine_dbgstr_rect(dirty_rect));
+ 
+-    if (!IsRectEmpty(dirty_rect))
++    /* Blit standalone surface content to matching popup windows before
++     * releasing the DC. On Windows, DirectComposition would composite
++     * DXGI surface content into associated windows automatically. */
++    if (resource->dc)
++    {
++        struct wined3d_sub_resource_desc desc;
++        struct wined3d_texture *texture;
++        struct wined3d_swapchain *swapchain;
++
++        wined3d_mutex_lock();
++        texture = wined3d_texture_from_resource(resource->wined3d_resource);
++        swapchain = wined3d_texture_get_swapchain(texture);
++
++        if (!swapchain)
++        {
++            wined3d_resource_get_sub_resource_desc(resource->wined3d_resource,
++                    resource->subresource_idx, &desc);
++            wined3d_mutex_unlock();
++
++            if (desc.width > 1 && desc.height > 1)
++                dxgi_surface_blit_to_popup_windows(resource->dc, desc.width, desc.height);
++        }
++        else
++        {
++            wined3d_mutex_unlock();
++        }
++    }
++
++    if (dirty_rect && !IsRectEmpty(dirty_rect))
+         FIXME("dirty rectangle is ignored.\n");
+ 
+     wined3d_mutex_lock();
+diff --git a/dlls/dxgi/swapchain.c b/dlls/dxgi/swapchain.c
+index 4797fcec..a5445c86 100644
+--- a/dlls/dxgi/swapchain.c
++++ b/dlls/dxgi/swapchain.c
+@@ -234,11 +234,55 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
+     if (!refcount)
+     {
+         IWineDXGIDevice *device = swapchain->device;
++        if (swapchain->frame_latency_event)
++            CloseHandle(swapchain->frame_latency_event);
+         if (swapchain->target)
+         {
+             WARN("Releasing fullscreen swapchain.\n");
+             IDXGIOutput_Release(swapchain->target);
+         }
++        /* Tear down DComp composition-window subclassing/props before the
++         * swapchain is freed.  A reblit timer on a *surviving* plugin window
++         * would otherwise fire and dereference this freed swapchain pointer
++         * (use-after-free).  Window properties are server-side and safe to
++         * remove cross-thread, so the swapchain back-reference is always
++         * broken; the window-owning operations (KillTimer, WndProc restore,
++         * DestroyWindow) only run when Release happens on the window's own UI
++         * thread, where they are valid. */
++        if (swapchain->target_hwnd)
++        {
++            HWND t = swapchain->target_hwnd;
++
++            RemovePropW(t, L"__wine_dcomp_swapchain");
++            if (IsWindow(t) && GetWindowThreadProcessId(t, NULL) == GetCurrentThreadId())
++            {
++                WNDPROC orig = (WNDPROC)GetPropW(t, L"__wine_dcomp_orig_wndproc");
++
++                KillTimer(t, DCOMP_REBLIT_TIMER_ID);
++                KillTimer(t, DCOMP_POPUP_REBLIT_TIMER_ID);
++                if (orig)
++                    SetWindowLongPtrW(t, GWLP_WNDPROC, (LONG_PTR)orig);
++                RemovePropW(t, L"__wine_dcomp_orig_wndproc");
++                RemovePropW(t, L"__wine_dcomp_comp_dc");
++                RemovePropW(t, L"__wine_dcomp_comp_size");
++                RemovePropW(t, L"__wine_dcomp_comp_bits");
++                InterlockedDecrement(&dcomp_subclassed_target_count);
++            }
++            swapchain->target_hwnd = NULL;
++        }
++        if (swapchain->comp_wnd)
++        {
++            WCHAR prop_name[64];
++
++            swprintf(prop_name, ARRAY_SIZE(prop_name),
++                    L"__wine_dcomp_wnd_%I64x", (UINT_PTR)iface);
++            RemovePropW(GetDesktopWindow(), prop_name);
++            RemovePropW(swapchain->comp_wnd, L"__wine_dcomp_swapchain");
++            if (IsWindow(swapchain->comp_wnd)
++                    && GetWindowThreadProcessId(swapchain->comp_wnd, NULL) == GetCurrentThreadId())
++                DestroyWindow(swapchain->comp_wnd);
++            swapchain->comp_wnd = NULL;
++        }
+         IWineDXGIFactory_Release(swapchain->factory);
+         wined3d_swapchain_decref(swapchain->wined3d_swapchain);
+         IWineDXGIDevice_Release(device);
+@@ -324,7 +368,16 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
+     }
+ 
+     if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL, NULL, NULL, sync_interval, 0)))
++    {
++        /* Back-buffer copy for FLIP_SEQUENTIAL/FLIP_DISCARD is now handled
++         * inside the wined3d CS present handler (wined3d_cs_exec_present)
++         * to avoid a race with frame_latency_event. */
++
+         InterlockedIncrement(&swapchain->present_count);
++
++        if (swapchain->frame_latency_event)
++            SetEvent(swapchain->frame_latency_event);
++    }
+     return hr;
+ }
+ 
+@@ -626,7 +679,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDesc1(IDXGISwapChain4 *iface
+     wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
+     wined3d_mutex_unlock();
+ 
+-    FIXME("Ignoring Stereo, Scaling and AlphaMode.\n");
++    FIXME("Ignoring Stereo and Scaling.\n");
+ 
+     desc->Width = wined3d_desc.backbuffer_width;
+     desc->Height = wined3d_desc.backbuffer_height;
+@@ -638,7 +691,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDesc1(IDXGISwapChain4 *iface
+     desc->BufferCount = wined3d_desc.backbuffer_count;
+     desc->Scaling = DXGI_SCALING_STRETCH;
+     desc->SwapEffect = dxgi_swap_effect_from_wined3d(wined3d_desc.swap_effect);
+-    desc->AlphaMode = DXGI_ALPHA_MODE_IGNORE;
++    desc->AlphaMode = swapchain->alpha_mode;
+     desc->Flags = dxgi_swapchain_flags_from_wined3d(wined3d_desc.flags);
+ 
+     return S_OK;
+@@ -708,8 +761,17 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface
+     TRACE("iface %p, sync_interval %u, flags %#x, present_parameters %p.\n",
+             iface, sync_interval, flags, present_parameters);
+ 
+-    if (present_parameters)
+-        FIXME("Ignored present parameters %p.\n", present_parameters);
++    /* Pass dirty rects to wined3d for partial GDI blit (DComp composition). */
++    if (present_parameters && present_parameters->DirtyRectsCount > 0
++            && present_parameters->pDirtyRects)
++    {
++        wined3d_swapchain_set_dirty_rects(swapchain->wined3d_swapchain,
++                present_parameters->pDirtyRects, present_parameters->DirtyRectsCount);
++    }
++    else
++    {
++        wined3d_swapchain_set_dirty_rects(swapchain->wined3d_swapchain, NULL, 0);
++    }
+ 
+     return d3d11_swapchain_present(swapchain, sync_interval, flags);
+ }
+@@ -795,9 +857,25 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetMaximumFrameLatency(IDXGISwa
+ 
+ static HANDLE STDMETHODCALLTYPE d3d11_swapchain_GetFrameLatencyWaitableObject(IDXGISwapChain4 *iface)
+ {
+-    FIXME("iface %p stub!\n", iface);
++    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
++
++    TRACE("iface %p.\n", iface);
++
++    if (!swapchain->frame_latency_event)
++    {
++        HANDLE event = CreateEventW(NULL, FALSE, TRUE, NULL);
++
++        /* Install atomically: concurrent callers must not each create an event
++         * and race storing it (handle leak + inconsistent returned object).  If
++         * another thread won, keep theirs and close ours. */
++        if (InterlockedCompareExchangePointer((void * volatile *)&swapchain->frame_latency_event,
++                event, NULL))
++            CloseHandle(event);
++        else
++            FIXME("Created frame latency event %p for swapchain %p.\n", event, swapchain);
++    }
+ 
+-    return NULL;
++    return swapchain->frame_latency_event;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetMatrixTransform(IDXGISwapChain4 *iface,
+diff --git a/include/d3d11.idl b/include/d3d11.idl
+index 9a246fa7..d13a7ad8 100644
+--- a/include/d3d11.idl
++++ b/include/d3d11.idl
+@@ -855,23 +855,34 @@ typedef enum D3D11_FILTER_TYPE
+     D3D11_FILTER_TYPE_LINEAR = 1
+ } D3D11_FILTER_TYPE;
+ 
++typedef enum D3D11_FILTER_REDUCTION_TYPE
++{
++    D3D11_FILTER_REDUCTION_TYPE_STANDARD   = 0x0,
++    D3D11_FILTER_REDUCTION_TYPE_COMPARISON = 0x1,
++    D3D11_FILTER_REDUCTION_TYPE_MINIMUM    = 0x2,
++    D3D11_FILTER_REDUCTION_TYPE_MAXIMUM    = 0x3,
++} D3D11_FILTER_REDUCTION_TYPE;
++
++const UINT D3D11_FILTER_REDUCTION_TYPE_SHIFT = 7;
+ const UINT D3D11_MIN_FILTER_SHIFT = 4;
+ const UINT D3D11_MAG_FILTER_SHIFT = 2;
+ const UINT D3D11_MIP_FILTER_SHIFT = 0;
+-const UINT D3D11_FILTER_TYPE_MASK          = 0x00000003;
+-const UINT D3D11_COMPARISON_FILTERING_BIT  = 0x00000080;
+-const UINT D3D11_ANISOTROPIC_FILTERING_BIT = 0x00000040;
+ 
+-cpp_quote("#define D3D11_ENCODE_BASIC_FILTER(min, mag, mip, bComparison) \\")
+-cpp_quote("    ((D3D11_FILTER)(((bComparison) ? D3D11_COMPARISON_FILTERING_BIT : 0 ) | \\")
+-cpp_quote("                    (((min)&D3D11_FILTER_TYPE_MASK) << D3D11_MIN_FILTER_SHIFT) | \\")
++const UINT D3D11_FILTER_REDUCTION_TYPE_MASK = 0x00000003;
++const UINT D3D11_FILTER_TYPE_MASK           = 0x00000003;
++const UINT D3D11_COMPARISON_FILTERING_BIT   = 0x00000080;
++const UINT D3D11_ANISOTROPIC_FILTERING_BIT  = 0x00000040;
++
++cpp_quote("#define D3D11_ENCODE_BASIC_FILTER(min, mag, mip, reduction_mode) \\")
++cpp_quote("    ((D3D11_FILTER)((((min)&D3D11_FILTER_TYPE_MASK) << D3D11_MIN_FILTER_SHIFT) | \\")
+ cpp_quote("                    (((mag)&D3D11_FILTER_TYPE_MASK) << D3D11_MAG_FILTER_SHIFT) | \\")
+-cpp_quote("                    (((mip)&D3D11_FILTER_TYPE_MASK) << D3D11_MIP_FILTER_SHIFT)))")
++cpp_quote("                    (((mip)&D3D11_FILTER_TYPE_MASK) << D3D11_MIP_FILTER_SHIFT) | \\")
++cpp_quote("                    (((reduction_mode)&D3D11_FILTER_REDUCTION_TYPE_MASK) << D3D11_FILTER_REDUCTION_TYPE_SHIFT)))")
+ 
+-cpp_quote("#define D3D11_ENCODE_ANISOTROPIC_FILTER(bComparison) \\")
++cpp_quote("#define D3D11_ENCODE_ANISOTROPIC_FILTER(reduction_mode) \\")
+ cpp_quote("    ((D3D11_FILTER)(D3D11_ANISOTROPIC_FILTERING_BIT | \\" )
+ cpp_quote("                    D3D11_ENCODE_BASIC_FILTER(D3D11_FILTER_TYPE_LINEAR,D3D11_FILTER_TYPE_LINEAR, \\" )
+-cpp_quote("                                              D3D11_FILTER_TYPE_LINEAR,bComparison)))" )
++cpp_quote("                                              D3D11_FILTER_TYPE_LINEAR,reduction_mode)))" )
+ 
+ cpp_quote("#define D3D11_DECODE_MIN_FILTER(d3d11Filter) \\")
+ cpp_quote("    ((D3D11_FILTER_TYPE)(((d3d11Filter) >> D3D11_MIN_FILTER_SHIFT) & D3D11_FILTER_TYPE_MASK))")
+@@ -882,7 +893,11 @@ cpp_quote("    ((D3D11_FILTER_TYPE)(((d3d11Filter) >> D3D11_MAG_FILTER_SHIFT) &
+ cpp_quote("#define D3D11_DECODE_MIP_FILTER(d3d11Filter) \\")
+ cpp_quote("    ((D3D11_FILTER_TYPE)(((d3d11Filter) >> D3D11_MIP_FILTER_SHIFT) & D3D11_FILTER_TYPE_MASK))")
+ 
+-cpp_quote("#define D3D11_DECODE_IS_COMPARISON_FILTER(d3d11Filter) ((d3d11Filter) & D3D11_COMPARISON_FILTERING_BIT)")
++cpp_quote("#define D3D11_DECODE_FILTER_REDUCTION(filter) \\")
++cpp_quote("    ((D3D11_FILTER_REDUCTION_TYPE)(((filter) >> D3D11_FILTER_REDUCTION_TYPE_SHIFT) & D3D11_FILTER_REDUCTION_TYPE_MASK))")
++
++cpp_quote("#define D3D11_DECODE_IS_COMPARISON_FILTER(filter) \\")
++cpp_quote("    (D3D11_DECODE_FILTER_REDUCTION(filter) == D3D11_FILTER_REDUCTION_TYPE_COMPARISON)")
+ 
+ cpp_quote("#define D3D11_DECODE_IS_ANISOTROPIC_FILTER(d3d11Filter) \\")
+ cpp_quote("    (((d3d11Filter) & D3D11_ANISOTROPIC_FILTERING_BIT ) \\" )

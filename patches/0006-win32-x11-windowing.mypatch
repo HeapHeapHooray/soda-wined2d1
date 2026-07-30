@@ -1,0 +1,965 @@
+diff --git a/dlls/comctl32/tooltips.c b/dlls/comctl32/tooltips.c
+index 1d8ac346..0c56d3f6 100644
+--- a/dlls/comctl32/tooltips.c
++++ b/dlls/comctl32/tooltips.c
+@@ -1481,6 +1481,14 @@ TOOLTIPS_Pop (TOOLTIPS_INFO *infoPtr)
+ {
+     TOOLTIPS_Hide (infoPtr);
+ 
++    /* If the tooltip is in tracking mode, TTM_POP should also hide it. */
++    if (infoPtr->bTrackActive)
++    {
++        TOOLTIPS_TrackHide (infoPtr);
++        infoPtr->bTrackActive = FALSE;
++        infoPtr->nTrackTool = -1;
++    }
++
+     return 0;
+ }
+ 
+diff --git a/dlls/ntdll/heap.c b/dlls/ntdll/heap.c
+index 4ff7405f..b3b639c9 100644
+--- a/dlls/ntdll/heap.c
++++ b/dlls/ntdll/heap.c
+@@ -955,6 +955,10 @@ static NTSTATUS heap_free_block( struct heap *heap, ULONG flags, struct block *b
+     /* keep room for a full committed block as hysteresis */
+     if (!next) subheap_decommit( heap, subheap, (char *)((struct entry *)block + 1) + REGION_ALIGN );
+ 
++    /* Note: interior free block MEM_RESET (MADV_FREE) was tested here but has no effect.
++     * Free blocks are reused within milliseconds — the kernel never gets a chance to
++     * reclaim the pages. See docs/wine-wined3d-buffer-leak.md Option D for details. */
++
+     return STATUS_SUCCESS;
+ }
+ 
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 7378c967..09da2534 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5281,7 +5281,11 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+     else if (type & MEM_RESET)
+     {
+         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
++#ifdef MADV_FREE
++        else madvise( base, size, MADV_FREE );
++#else
+         else madvise( base, size, MADV_DONTNEED );
++#endif
+     }
+     else  /* commit the pages */
+     {
+diff --git a/dlls/ole32/ole2.c b/dlls/ole32/ole2.c
+index f4672b70..977eb128 100644
+--- a/dlls/ole32/ole2.c
++++ b/dlls/ole32/ole2.c
+@@ -618,6 +618,7 @@ HRESULT WINAPI RegisterDragDrop(HWND hwnd, LPDROPTARGET pDropTarget)
+  */
+ HRESULT WINAPI RevokeDragDrop(HWND hwnd)
+ {
++  DWORD pid = 0;
+   HANDLE map;
+   IStream *stream;
+   IDropTarget *drop_target;
+@@ -631,6 +632,15 @@ HRESULT WINAPI RevokeDragDrop(HWND hwnd)
+     return DRAGDROP_E_INVALIDHWND;
+   }
+ 
++  /* block revoke for other processes windows; the stored drop target
++   * pointer is only valid in the registering process */
++  GetWindowThreadProcessId(hwnd, &pid);
++  if (pid != GetCurrentProcessId())
++  {
++    FIXME("revoke for another process windows is disabled\n");
++    return DRAGDROP_E_INVALIDHWND;
++  }
++
+   /* no registration data */
+   if (!(map = get_droptarget_handle(hwnd)))
+     return DRAGDROP_E_NOTREGISTERED;
+diff --git a/dlls/shell32/shell32_main.h b/dlls/shell32/shell32_main.h
+index 6b5575c6..f942f9ec 100644
+--- a/dlls/shell32/shell32_main.h
++++ b/dlls/shell32/shell32_main.h
+@@ -103,6 +103,7 @@ HRESULT WINAPI ExplorerBrowser_Constructor(IUnknown *pUnkOuter, REFIID riid, LPV
+ HRESULT WINAPI KnownFolderManager_Constructor(IUnknown *pUnkOuter, REFIID riid, LPVOID *ppv);
+ HRESULT WINAPI IFileOperation_Constructor(IUnknown *outer, REFIID riid, void **out);
+ HRESULT WINAPI ActiveDesktop_Constructor(IUnknown *outer, REFIID riid, void **out);
++HRESULT WINAPI VirtualDesktopManager_Constructor(IUnknown *outer, REFIID riid, void **out);
+ 
+ extern HRESULT CPanel_GetIconLocationW(LPCITEMIDLIST, LPWSTR, UINT, int*);
+ HRESULT WINAPI CPanel_ExtractIconA(LPITEMIDLIST pidl, LPCSTR pszFile, UINT nIconIndex, HICON *phiconLarge, HICON *phiconSmall, UINT nIconSize);
+diff --git a/dlls/shell32/virtualdesktop.c b/dlls/shell32/virtualdesktop.c
+new file mode 100644
+index 00000000..94d1e616
+--- /dev/null
++++ b/dlls/shell32/virtualdesktop.c
+@@ -0,0 +1,169 @@
++/*
++ * VirtualDesktopManager stub implementation
++ *
++ * Copyright 2026 Giang Nguyen
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <stdarg.h>
++
++#define COBJMACROS
++#include "windef.h"
++#include "winbase.h"
++#include "winuser.h"
++#include "objbase.h"
++
++#include "wine/debug.h"
++#include "shell32_main.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(shell);
++
++const GUID CLSID_VirtualDesktopManager =
++        {0xaa509086, 0x5ca9, 0x4c25, {0x8f, 0x95, 0x58, 0x9d, 0x3c, 0x07, 0xb4, 0x8a}};
++static const GUID IID_IVirtualDesktopManager =
++        {0xa5cd92ff, 0x29be, 0x454c, {0x8d, 0x04, 0xd8, 0x28, 0x79, 0xfb, 0x3f, 0x1b}};
++
++/* IVirtualDesktopManager vtable — not in Wine headers yet. */
++typedef struct IVirtualDesktopManagerVtbl
++{
++    /* IUnknown */
++    HRESULT (STDMETHODCALLTYPE *QueryInterface)(
++            IUnknown *iface, REFIID riid, void **out);
++    ULONG   (STDMETHODCALLTYPE *AddRef)(IUnknown *iface);
++    ULONG   (STDMETHODCALLTYPE *Release)(IUnknown *iface);
++    /* IVirtualDesktopManager */
++    HRESULT (STDMETHODCALLTYPE *IsWindowOnCurrentVirtualDesktop)(
++            IUnknown *iface, HWND hwnd, BOOL *on_current);
++    HRESULT (STDMETHODCALLTYPE *GetWindowDesktopId)(
++            IUnknown *iface, HWND hwnd, GUID *desktop_id);
++    HRESULT (STDMETHODCALLTYPE *MoveWindowToDesktop)(
++            IUnknown *iface, HWND hwnd, REFGUID desktop_id);
++} IVirtualDesktopManagerVtbl;
++
++struct virtual_desktop_manager
++{
++    IVirtualDesktopManagerVtbl *lpVtbl;
++    LONG ref;
++};
++
++static inline struct virtual_desktop_manager *impl_from_IUnknown(IUnknown *iface)
++{
++    return CONTAINING_RECORD(iface, struct virtual_desktop_manager, lpVtbl);
++}
++
++static HRESULT STDMETHODCALLTYPE vdm_QueryInterface(IUnknown *iface, REFIID riid, void **out)
++{
++    struct virtual_desktop_manager *This = impl_from_IUnknown(iface);
++
++    TRACE("(%p)->(%s, %p)\n", This, debugstr_guid(riid), out);
++
++    if (!out)
++        return E_POINTER;
++
++    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IVirtualDesktopManager))
++    {
++        *out = &This->lpVtbl;
++        IUnknown_AddRef(iface);
++        return S_OK;
++    }
++
++    FIXME("(%p)->(%s, %p) not found\n", This, debugstr_guid(riid), out);
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG STDMETHODCALLTYPE vdm_AddRef(IUnknown *iface)
++{
++    struct virtual_desktop_manager *This = impl_from_IUnknown(iface);
++    ULONG ref = InterlockedIncrement(&This->ref);
++
++    TRACE("(%p) ref=%lu\n", This, ref);
++    return ref;
++}
++
++static ULONG STDMETHODCALLTYPE vdm_Release(IUnknown *iface)
++{
++    struct virtual_desktop_manager *This = impl_from_IUnknown(iface);
++    ULONG ref = InterlockedDecrement(&This->ref);
++
++    TRACE("(%p) ref=%lu\n", This, ref);
++    if (!ref)
++        free(This);
++    return ref;
++}
++
++static HRESULT STDMETHODCALLTYPE vdm_IsWindowOnCurrentVirtualDesktop(
++        IUnknown *iface, HWND hwnd, BOOL *on_current)
++{
++    TRACE("(%p)->(%p, %p) stub!\n", iface, hwnd, on_current);
++
++    if (!on_current)
++        return E_INVALIDARG;
++
++    *on_current = TRUE;
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE vdm_GetWindowDesktopId(
++        IUnknown *iface, HWND hwnd, GUID *desktop_id)
++{
++    FIXME("(%p)->(%p, %p) stub!\n", iface, hwnd, desktop_id);
++
++    if (!desktop_id)
++        return E_INVALIDARG;
++
++    memset(desktop_id, 0, sizeof(*desktop_id));
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE vdm_MoveWindowToDesktop(
++        IUnknown *iface, HWND hwnd, REFGUID desktop_id)
++{
++    FIXME("(%p)->(%p, %s) stub!\n", iface, hwnd, debugstr_guid(desktop_id));
++    return S_OK;
++}
++
++static const IVirtualDesktopManagerVtbl vdm_vtbl =
++{
++    vdm_QueryInterface,
++    vdm_AddRef,
++    vdm_Release,
++    vdm_IsWindowOnCurrentVirtualDesktop,
++    vdm_GetWindowDesktopId,
++    vdm_MoveWindowToDesktop,
++};
++
++HRESULT WINAPI VirtualDesktopManager_Constructor(IUnknown *outer, REFIID riid, void **out)
++{
++    struct virtual_desktop_manager *object;
++    HRESULT hr;
++
++    TRACE("(%p, %s, %p)\n", outer, debugstr_guid(riid), out);
++
++    if (outer)
++        return CLASS_E_NOAGGREGATION;
++
++    object = calloc(1, sizeof(*object));
++    if (!object)
++        return E_OUTOFMEMORY;
++
++    object->lpVtbl = (IVirtualDesktopManagerVtbl *)&vdm_vtbl;
++    object->ref = 1;
++
++    hr = vdm_QueryInterface((IUnknown *)&object->lpVtbl, riid, out);
++    vdm_Release((IUnknown *)&object->lpVtbl);
++    return hr;
++}
+diff --git a/dlls/win32u/cursoricon.c b/dlls/win32u/cursoricon.c
+index fedd122e..506af20c 100644
+--- a/dlls/win32u/cursoricon.c
++++ b/dlls/win32u/cursoricon.c
+@@ -77,6 +77,22 @@ static struct cursoricon_object *get_icon_ptr( HICON handle )
+ BOOL process_wine_setcursor( HWND hwnd, HWND window, HCURSOR handle )
+ {
+     TRACE( "hwnd %p, window %p, hcursor %p\n", hwnd, window, handle );
++    if (!handle)
++    {
++        /* Native Windows shows the class cursor, then the system arrow, for a
++         * window whose cursor is not set — never the empty/transparent cursor
++         * that hides the pointer. Only ShowCursor(FALSE) (count < 0) should
++         * hide it; CURSOR_SHOWING is clear in that case. */
++        CURSORINFO info;
++        info.cbSize = sizeof(info);
++        if (NtUserGetCursorInfo( &info ) && (info.flags & CURSOR_SHOWING))
++        {
++            handle = (HCURSOR)get_class_long_ptr( window, GCLP_HCURSOR, FALSE );
++            if (!handle) handle = LoadImageW( 0, MAKEINTRESOURCEW(IDC_ARROW),
++                                              IMAGE_CURSOR, 0, 0,
++                                              LR_SHARED | LR_DEFAULTSIZE );
++        }
++    }
+     user_driver->pSetCursor( window, handle );
+     return TRUE;
+ }
+diff --git a/dlls/win32u/dce.c b/dlls/win32u/dce.c
+index 506f531a..14187cbc 100644
+--- a/dlls/win32u/dce.c
++++ b/dlls/win32u/dce.c
+@@ -549,6 +549,8 @@ W32KAPI struct window_surface *window_surface_create( UINT size, const struct wi
+ 
+     pthread_mutex_init( &surface->mutex, NULL );
+ 
++    memset( window_surface_get_color( surface, info ), 0x00, info->bmiHeader.biSizeImage );
++
+     TRACE( "created surface %p for hwnd %p rect %s\n", surface, hwnd, wine_dbgstr_rect( &surface->rect ) );
+     return surface;
+ }
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index c8404172..abc63fa0 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -3896,6 +3896,18 @@ BOOL set_window_pos( WINDOWPOS *winpos, int parent_x, int parent_y )
+     }
+     if (surface) window_surface_release( surface );
+ 
++    /* After apply_window_pos, the window's content may have been BitBlt'd from the
++     * old position. During batch processing (EndDeferWindowPos), sibling expose_window
++     * calls can set update regions that cause DCX_EXCLUDERGN to skip parts of the
++     * BitBlt, leaving stale content. Force a full invalidation so WM_PAINT repaints
++     * everything correctly on top of the BitBlt'd content. */
++    if (!(winpos->flags & (SWP_NOREDRAW | SWP_HIDEWINDOW | SWP_SHOWWINDOW)) &&
++        (winpos->flags & SWP_AGG_STATUSFLAGS) != SWP_AGG_NOGEOMETRYCHANGE)
++    {
++        TRACE( "hwnd %p: post-move invalidation (flags %08x)\n", winpos->hwnd, (int)winpos->flags );
++        NtUserRedrawWindow( winpos->hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN );
++    }
++
+     if (winpos->flags & SWP_HIDEWINDOW)
+     {
+         NtUserNotifyWinEvent( EVENT_OBJECT_HIDE, winpos->hwnd, 0, 0 );
+diff --git a/dlls/winealsa.drv/alsa.c b/dlls/winealsa.drv/alsa.c
+index 046b447a..4af48a91 100644
+--- a/dlls/winealsa.drv/alsa.c
++++ b/dlls/winealsa.drv/alsa.c
+@@ -731,6 +731,17 @@ static HRESULT map_channels(EDataFlow flow, const WAVEFORMATEX *fmt, int *alsa_c
+ {
+     BOOL need_remap;
+ 
++    if(fmt->nChannels > 32){
++        WARN("Channel count %u exceeds map size (32); not remapping.\n", fmt->nChannels);
++        *alsa_channels = 2;
++        map[0] = 0;
++        map[1] = 1;
++        /* Return S_FALSE (consistent with stream-creation's >32 rejection) so the
++         * caller leaves need_remapping FALSE and remap_channels() — which indexes
++         * the fixed alsa_channel_map[32] up to fmt->nChannels — is never reached. */
++        return S_FALSE;
++    }
++
+     if(flow != eCapture && (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE || fmt->nChannels > 2) ){
+         WAVEFORMATEXTENSIBLE *fmtex = (void*)fmt;
+         UINT mask, flag = SPEAKER_FRONT_LEFT;
+@@ -882,6 +893,12 @@ static NTSTATUS alsa_create_stream(void *args)
+     stream->mmdev_period_frames = muldiv(params->fmt->nSamplesPerSec,
+             stream->mmdev_period_rt, 10000000);
+ 
++    if (stream->mmdev_period_frames == 0)
++    {
++        params->result = E_INVALIDARG;
++        goto exit;
++    }
++
+     /* Buffer 4 ALSA periods if large enough, else 4 mmdevapi periods */
+     stream->alsa_bufsize_frames = stream->mmdev_period_frames * 4;
+     if(err < 0 || alsa_period_us < params->period / 10)
+@@ -1957,6 +1974,10 @@ static NTSTATUS alsa_is_format_supported(void *args)
+     }else if(params->fmt_in->nChannels < min){
+         params->result = S_FALSE;
+         closest->Format.nChannels = min;
++    }else if(params->fmt_in->nChannels > 32){
++        WARN("Channel count %u exceeds supported limit.\n", params->fmt_in->nChannels);
++        params->result = S_FALSE;
++        goto exit;
+     }
+ 
+     map_channels(params->flow, params->fmt_in, &alsa_channels, alsa_channel_map);
+diff --git a/dlls/winex11.drv/bitblt.c b/dlls/winex11.drv/bitblt.c
+index dd9ddb27..e54df1ff 100644
+--- a/dlls/winex11.drv/bitblt.c
++++ b/dlls/winex11.drv/bitblt.c
+@@ -1866,6 +1866,37 @@ static BOOL x11drv_surface_flush( struct window_surface *window_surface, const R
+ #endif /* HAVE_LIBXSHAPE */
+     }
+ 
++    /* Issue 55 (Serum2 ENV drag-bitmap black flicker): a small WS_EX_LAYERED
++     * drag window's win32u surface is recreated black on every move (VSTGUI
++     * per-paint swapchain churn) and flushed before the async wined3d BitBlt
++     * lands.  Suppress a fully-black flush for small surfaces so the X window
++     * keeps the last good (bitmap) frame.  Paired with background_pixmap=None
++     * (X no longer paints the expose background black either). */
++    if (color_info->bmiHeader.biBitCount == 32)
++    {
++        int sw = color_info->bmiHeader.biWidth, sh = abs( color_info->bmiHeader.biHeight );
++
++        if (sw > 0 && sw <= 400 && sh > 0 && sh <= 200)
++        {
++            const DWORD *px = color_bits;
++            unsigned int x, y;
++
++            /* Suppress only if every pixel is black. Bail on the first
++             * non-black pixel — O(1) in the common case (drag bitmap with
++             * visible content), worst case stays O(n) only for genuinely
++             * black frames. (Issue 73 perf, was per-pixel black-count scan.) */
++            for (y = dirty->top; y < (UINT)dirty->bottom; y++)
++                for (x = dirty->left; x < (UINT)dirty->right; x++)
++                    if ((px[y * sw + x] & 0x00ffffff) != 0)
++                        goto not_all_black;
++
++            XFlush( gdi_display );
++            return TRUE; /* keep previous X content, skip the black push */
++        not_all_black:
++            ;
++        }
++    }
++
+     if (!put_shm_image( ximage, &surface->image->shminfo, surface->window, surface->gc, &rect, dirty ))
+         XPutImage( gdi_display, surface->window, surface->gc, ximage, dirty->left,
+                    dirty->top, rect.left + dirty->left, rect.top + dirty->top,
+diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
+index 57af26d2..957e7738 100644
+--- a/dlls/winex11.drv/init.c
++++ b/dlls/winex11.drv/init.c
+@@ -220,6 +220,10 @@ static BOOL needs_client_window_clipping( HWND hwnd )
+ 
+ BOOL needs_offscreen_rendering( HWND hwnd, BOOL known_child, BOOL check_gamma )
+ {
++    static const WCHAR dcomp_target_propW[] =
++        {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','r','g','e','t',0};
++    static const WCHAR d3d_hwnd_target_propW[] =
++        {'_','_','w','i','n','e','_','d','3','d','_','h','w','n','d','_','t','a','r','g','e','t',0};
+     static int no_child_clipping_cached = -1;
+     struct window_surface *surface;
+     DWORD layered_flags;
+@@ -259,7 +263,35 @@ BOOL needs_offscreen_rendering( HWND hwnd, BOOL known_child, BOOL check_gamma )
+     if (NtUserGetDpiForWindow( hwnd ) != NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI )
+         && !enable_fullscreen_hack( hwnd, check_gamma ))
+         return TRUE; /* needs DPI scaling */
+-    if (NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow()) return TRUE; /* child window, needs compositing */
++    if (NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow())
++    {
++        /* DComp target windows render via their own BitBlt path (comp_dc → GetDC),
++         * not through the GL client_surface.  Offscreen XComposite compositing is
++         * unnecessary and causes flicker when popups open/close over the plugin.
++         *
++         * NB: this keys off __wine_dcomp_target (set by dcomp/device.c for the
++         * IDCompositionTarget COM-API BitBlt path), deliberately NOT off
++         * __wine_dcomp_swapchain (set by dxgi/factory.c for the composition-
++         * swapchain blit path).  The two markers denote distinct rendering
++         * subsystems, not the same window — neither producer sets the other's
++         * property.  The swapchain blit path presents through its own GDI route,
++         * so swapchain-only windows are not expected to need the offscreen skip
++         * and are left on the normal compositing path.  Do not "unify" the two
++         * markers here without a verified swapchain-child test case: it would
++         * change the offscreen decision for currently-working windows. */
++        if (NtUserGetProp( hwnd, dcomp_target_propW )) return FALSE;
++        /* ID2D1HwndRenderTarget windows (e.g. VSTGUI plugins with DComp disabled)
++         * render via wined3d's swapchain_blit_gdi to the HWND DC, but the GDI
++         * present path never triggers client_surface_present.  When the window
++         * is offscreen-redirected the rendered pixels are stuck in an X11
++         * pixmap that nothing blits to the toplevel — result is a black plugin
++         * window until external events (window move, mouse hover) kick a
++         * repaint.  Skip offscreen for these windows so the plugin's X11 child
++         * is attached directly to the parent and visible without a composite
++         * trigger. */
++        if (NtUserGetProp( hwnd, d3d_hwnd_target_propW )) return FALSE;
++        return TRUE; /* child window, needs compositing */
++    }
+     if (no_child_clipping_cached) return FALSE;
+     if (NtUserGetWindowRelative( hwnd, GW_CHILD ) || known_child) return needs_client_window_clipping( hwnd ); /* window has children, needs compositing */
+     return FALSE;
+diff --git a/dlls/winex11.drv/mouse.c b/dlls/winex11.drv/mouse.c
+index 6d59de4b..1708ea8c 100644
+--- a/dlls/winex11.drv/mouse.c
++++ b/dlls/winex11.drv/mouse.c
+@@ -203,6 +203,32 @@ static Cursor get_empty_cursor(void)
+     return cursor;
+ }
+ 
++/***********************************************************************
++ *		get_default_cursor
++ *
++ * Return a shared visible arrow cursor used as the initial cursor for newly
++ * created windows.  Without it a window keeps the X11 default of inheriting
++ * its parent's cursor; this breaks for cross-process embedded surfaces (e.g.
++ * WebView2/Chromium content windows) which never call SetCursor and whose
++ * inheritance chain to the owner window is severed once the window manager
++ * reparents the toplevel into a frame, leaving the cursor blank.
++ */
++Cursor get_default_cursor(void)
++{
++    static Cursor cursor;
++
++    if (!cursor)
++    {
++        Cursor new = XCreateFontCursor( gdi_display, XC_left_ptr );
++        /* flush so the cursor is known to the server before another display
++           connection (create_whole_window uses data->display) references it */
++        XFlush( gdi_display );
++        if (InterlockedCompareExchangePointer( (void **)&cursor, (void *)new, 0 ))
++            XFreeCursor( gdi_display, new );
++    }
++    return cursor;
++}
++
+ /***********************************************************************
+  *		set_window_cursor
+  */
+@@ -1612,6 +1638,18 @@ BOOL X11DRV_ButtonPress( HWND hwnd, XEvent *xev )
+     input.mi.time        = EVENT_x11_time_to_win32_time( event->time );
+     input.mi.dwExtraInfo = 0;
+ 
++    if (!hwnd)
++    {
++        /* Fallback for windows without an X11 window (e.g. reparented child).
++         * Use root coordinates and let Win32 hit-testing find the target. */
++        POINT pt = root_to_virtual_screen( event->x_root, event->y_root );
++        input.type = INPUT_MOUSE;
++        input.mi.dx = pt.x;
++        input.mi.dy = pt.y;
++        NtUserSendHardwareInput( 0, 0, &input, 0 );
++        return TRUE;
++    }
++
+     if ((data = get_win_data( hwnd )))
+     {
+         window_set_user_time( data, event->time, FALSE );
+@@ -1644,6 +1682,16 @@ BOOL X11DRV_ButtonRelease( HWND hwnd, XEvent *xev )
+     input.mi.time        = EVENT_x11_time_to_win32_time( event->time );
+     input.mi.dwExtraInfo = 0;
+ 
++    if (!hwnd)
++    {
++        POINT pt = root_to_virtual_screen( event->x_root, event->y_root );
++        input.type = INPUT_MOUSE;
++        input.mi.dx = pt.x;
++        input.mi.dy = pt.y;
++        NtUserSendHardwareInput( 0, 0, &input, 0 );
++        return TRUE;
++    }
++
+     map_event_coords( hwnd, event->window, event->root, event->x_root, event->y_root, &input );
+     send_mouse_input( hwnd, event->window, event->state, &input );
+     return TRUE;
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 21db970f..31f104f3 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -106,6 +106,19 @@ static const WCHAR clip_window_prop[] =
+     {'_','_','w','i','n','e','_','x','1','1','_','c','l','i','p','_','w','i','n','d','o','w',0};
+ static const WCHAR focus_time_prop[] =
+     {'_','_','w','i','n','e','_','x','1','1','_','f','o','c','u','s','_','t','i','m','e',0};
++static const WCHAR dcomp_swapchain_propW[] =
++    {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','w','a','p','c','h','a','i','n',0};
++static const WCHAR *dcomp_swapchain_prop = dcomp_swapchain_propW;
++static const WCHAR dcomp_popup_parent_propW[] =
++    {'_','_','w','i','n','e','_','d','c','o','m','p','_','p','o','p','u','p','_','p','a','r','e','n','t',0};
++static const WCHAR *dcomp_popup_parent_prop = dcomp_popup_parent_propW;
++/* Set on the desktop window by dxgi while a DComp plugin GUI is hosted in this
++ * session.  Used to mark embedded ownerless TOOLWINDOW popups as DROPDOWN_MENU
++ * (see set_style_hints) — they anchor to the host window, so the per-window
++ * dcomp discriminators below cannot see they belong to a DComp plugin. */
++static const WCHAR dcomp_active_propW[] =
++    {'_','_','w','i','n','e','_','d','c','o','m','p','_','a','c','t','i','v','e',0};
++static const WCHAR *dcomp_active_prop = dcomp_active_propW;
+ 
+ static const char *debugstr_mwm_hints( const MwmHints *hints )
+ {
+@@ -536,17 +549,70 @@ static unsigned long get_mwm_decorations( struct x11drv_win_data *data, DWORD st
+  */
+ static int get_window_attributes( struct x11drv_win_data *data, XSetWindowAttributes *attr )
+ {
++    DWORD ex_style = NtUserGetWindowLongW( data->hwnd, GWL_EXSTYLE );
++
+     attr->colormap          = data->whole_colormap ? data->whole_colormap : default_colormap;
+     attr->save_under        = ((NtUserGetClassLongW( data->hwnd, GCL_STYLE ) & CS_SAVEBITS) != 0);
+     attr->bit_gravity       = NorthWestGravity;
+     attr->backing_store     = NotUseful;
+     attr->border_pixel      = 0;
+-    attr->background_pixel  = 0;
+     attr->event_mask        = (ExposureMask | PointerMotionMask |
+                                ButtonPressMask | ButtonReleaseMask | EnterWindowMask |
+                                KeyPressMask | KeyReleaseMask | FocusChangeMask |
+                                KeymapStateMask | StructureNotifyMask | PropertyChangeMask);
+ 
++    /* DComp windows: use None background_pixmap to avoid black flash on map.
++     * Without this, XMapWindow shows background_pixel=0 (black) for 1 frame
++     * before the first surface_flush writes content. With None, the X server
++     * does not paint any background, so the parent content shows through.
++     *
++     * Also enable backing_store = Always so the X server saves window content
++     * written via surface_flush (XPutImage).  When a popup/tooltip above this
++     * window is unmapped, the X server uses the saved backing store to repaint
++     * the exposed area immediately, avoiding a 1-frame flash of undefined
++     * content (garbage, terminal, white) that occurs with NotUseful because
++     * the client has not yet processed the Expose event. */
++    if (NtUserGetProp( data->hwnd, dcomp_swapchain_prop ))
++    {
++        TRACE( "using None background_pixmap + Always backing_store for DComp window %p\n", data->hwnd );
++        attr->background_pixmap = None;
++        attr->backing_store = Always;
++        return (CWSaveUnder | CWColormap | CWBorderPixel | CWBackPixmap |
++                CWEventMask | CWBitGravity | CWBackingStore);
++    }
++
++    /* Issue 55: WS_EX_LAYERED windows render their own content; how to handle the
++     * X expose background depends on the window's visual:
++     *
++     * - Per-pixel-alpha layered windows (UpdateLayeredWindow/ULW_ALPHA, ARGB32
++     *   visual, data->use_alpha) such as JUCE's DropShadower use a 32-bit ARGB
++     *   visual where background_pixel = 0 means fully TRANSPARENT (alpha 0).  That
++     *   is exactly what the unpainted shadow border needs, so keep background_pixel
++     *   = 0.  Using background_pixmap = None here leaves the ARGB buffer
++     *   uninitialised, which a compositor shows as an opaque/milky border (issue
++     *   55 follow-up: KORG LegacyCell audio-device dropdown shadow).
++     *
++     * - Constant-alpha / colour-key layered windows (SetLayeredWindowAttributes,
++     *   default RGB visual, !data->use_alpha) such as the VSTGUI Win32DragBitmap
++     *   have background_pixel = 0 == opaque BLACK, which flashes black on every
++     *   move expose.  For those paint NO expose background (None) instead.  NO
++     *   backing_store = Always — that froze a black frame for a moving window. */
++    if (ex_style & WS_EX_LAYERED)
++    {
++        TRACE( "layered window %p use_alpha=%u layered=%u\n",
++               data->hwnd, data->use_alpha, data->layered );
++        if (data->use_alpha)
++        {
++            attr->background_pixel = 0;  /* ARGB32: pixel 0 == transparent */
++            return (CWSaveUnder | CWColormap | CWBorderPixel | CWBackPixel |
++                    CWEventMask | CWBitGravity | CWBackingStore);
++        }
++        attr->background_pixmap = None;
++        return (CWSaveUnder | CWColormap | CWBorderPixel | CWBackPixmap |
++                CWEventMask | CWBitGravity | CWBackingStore);
++    }
++
++    attr->background_pixel  = 0;
+     return (CWSaveUnder | CWColormap | CWBorderPixel | CWBackPixel |
+             CWEventMask | CWBitGravity | CWBackingStore);
+ }
+@@ -1073,6 +1139,7 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
+     Window group_leader = data->whole_window;
+     HWND owner = NtUserGetWindowRelative( data->hwnd, GW_OWNER );
+     Window owner_win = 0;
++    BOOL owner_from_heuristic = FALSE, anchor_is_dcomp = FALSE;
+     XWMHints *wm_hints;
+     Atom window_type;
+ 
+@@ -1082,10 +1149,78 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
+         owner_win = X11DRV_get_whole_window( owner );
+     }
+ 
++    /* DComp popup-stack transient anchor (set by the dxgi SET_TARGET handler):
++     * the previously-opened popup/main target. This is a STABLE anchor that
++     * yields the correct nested hierarchy (main <- settings <- dropdown), unlike
++     * get_active_window() which drifts to the GL-presenting main window and pulls
++     * every popup behind it (Trinity standalone z-order regression). Read here
++     * before the TOOLWINDOW heuristic so it also covers the settings target
++     * (NORMAL/WS_CAPTION, which never enters the TOOLWINDOW branch). Windows
++     * without this property (e.g. embedded VST3 popups) fall through to the
++     * unchanged get_active_window() path below. */
++    if (!owner_win)
++    {
++        HWND popup_parent = NtUserGetProp( data->hwnd, dcomp_popup_parent_prop );
++        if (popup_parent && popup_parent != data->hwnd)
++        {
++            Window parent_win = X11DRV_get_whole_window( NtUserGetAncestor( popup_parent, GA_ROOT ) );
++            if (parent_win)
++            {
++                owner_win = parent_win;
++                group_leader = parent_win;
++            }
++        }
++    }
++
++    /* For ownerless WS_POPUP|WS_EX_TOOLWINDOW windows (e.g. JUCE popup menus in
++     * embedded VST3 plugins), use the active window as implicit transient parent.
++     * Without transient_for, the window manager has no stacking context and may
++     * place the popup behind the application window.
++     *
++     * Exclude windows that carry WS_CAPTION: a titled WS_EX_TOOLWINDOW is a
++     * decorated top-level app window (e.g. FL Studio's invisible 1x1 container,
++     * style 0x94ca0000 = WS_POPUP|WS_CAPTION|WS_SYSMENU), not a borderless popup
++     * menu.  Such windows must stay out of the popup heuristic — see the matching
++     * WS_CAPTION guard on the UTILITY branch below (issue 50). */
++    if (!owner_win && (style & WS_POPUP) && (ex_style & WS_EX_TOOLWINDOW)
++            && !(style & WS_CAPTION))
++    {
++        HWND active = get_active_window();
++        if (active && active != data->hwnd)
++        {
++            HWND active_root = NtUserGetAncestor( active, GA_ROOT );
++            Window active_win = X11DRV_get_whole_window( active_root );
++            if (active_win)
++            {
++                /* Issue 81 + 82: do NOT set WM_TRANSIENT_FOR and do NOT fold
++                 * this window into the active window's WM_HINTS window_group.
++                 * KWin propagates _NET_WM_STATE_DEMANDS_ATTENTION both via
++                 * window_group (issue 81: persistent frame) AND via the
++                 * transient-parent (issue 82: frame while a menu popup is
++                 * open).  Vanilla sets neither on ownerless TOOLWINDOWs and has
++                 * neither problem; matching that here.  DComp popups still get
++                 * their anchor via the dcomp_popup_parent_prop path above. */
++                owner_from_heuristic = TRUE;
++            }
++            /* If the anchor (active window) is itself a DComp composition-swapchain
++             * window — the continuously GL-presenting main window, e.g. KORG Trinity
++             * standalone — this ownerless TOOLWINDOW is an in-plugin popup sitting
++             * over it.  Mark it so the type logic below uses DROPDOWN_MENU instead
++             * of UTILITY: the main window's present-driven self-reactivation steals
++             * _NET_ACTIVE_WINDOW from an activatable (UTILITY) popup → focus fight →
++             * flicker (same class as the #2 settings-popup regression, but these
++             * popups carry no __wine_dcomp_popup_parent property).  Embedded plugin
++             * GUIs anchor to the host window, which is NOT a DComp swapchain target,
++             * so they stay UTILITY → unchanged (no embedded regression). */
++            if (active_root && NtUserGetProp( active_root, dcomp_swapchain_prop ))
++                anchor_is_dcomp = TRUE;
++        }
++    }
++
+     if (owner_win)
+     {
+         XSetTransientForHint( data->display, data->whole_window, owner_win );
+-        group_leader = owner_win;
++        if (!owner_from_heuristic) group_leader = owner_win;
+     }
+ 
+     /* Only use dialog type for owned popups. Metacity allows making fullscreen
+@@ -1094,6 +1229,55 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
+      */
+     if (((style & WS_POPUP) || (ex_style & WS_EX_DLGMODALFRAME)) && owner)
+         window_type = x11drv_atom(_NET_WM_WINDOW_TYPE_DIALOG);
++    else if ((style & WS_POPUP) && (ex_style & WS_EX_TOOLWINDOW) && !owner
++            && !(style & WS_CAPTION))
++    {
++        /* The WS_CAPTION guard above keeps decorated app windows out of this
++         * branch: FL Studio's ownerless WS_POPUP|WS_EX_TOOLWINDOW main container
++         * (style 0x94ca0000) was wrongly tagged UTILITY here, which KDE treats as
++         * an activation-coupled tool window and minimizes on every _NET_ACTIVE_-
++         * WINDOW change → _NET_WM_STATE_HIDDEN → taskbar click no longer raises it
++         * (issue 50).  Vanilla has no UTILITY branch and leaves it NORMAL; with
++         * the guard such windows now fall through to NORMAL below, matching vanilla.
++         * Only borderless popup menus (no WS_CAPTION) reach the UTILITY/DROPDOWN
++         * logic this branch was written for.
++         *
++         * DComp dropdown popups (carry the popup-parent property from the dxgi
++         * popup stack): use DROPDOWN_MENU so the WM treats them as transient,
++         * non-activatable menus. UTILITY is an activatable window, which made KDE
++         * pull each popup into the focus/stacking rotation → _NET_ACTIVE_WINDOW
++         * conflicts → front/back restack loop (the dropdown "blink"). DROPDOWN_MENU
++         * stays managed (no override_redirect → embedded-safe) but is excluded
++         * from focus rotation.
++         *
++         * Third discriminator (embedded, broad): a DComp plugin GUI is hosted in
++         * this session (dxgi published __wine_dcomp_active on the desktop). In the
++         * embedded case (plugin in a Windows host under Wine) the in-plugin popups
++         * anchor to the host window, not to a DComp swapchain — so neither the
++         * popup-parent property nor anchor_is_dcomp fires, and they stayed UTILITY
++         * → the same focus war among themselves (Trinity IFX list flicker). This
++         * flag catches them. It is deliberately broad (any TOOLWINDOW popup while
++         * a DComp GUI is open) — validated against Serum2 (embedded dropdowns must
++         * not regress). */
++        if (NtUserGetProp( data->hwnd, dcomp_popup_parent_prop ) || anchor_is_dcomp
++                || NtUserGetProp( NtUserGetDesktopWindow(), dcomp_active_prop ))
++            window_type = x11drv_atom(_NET_WM_WINDOW_TYPE_DROPDOWN_MENU);
++        else
++            /* Issue 84: ownerless TOOLWINDOW popups of non-DComp apps (KM88
++             * Editor, other pure-D2D/JUCE standalone editors) use NORMAL, not
++             * UTILITY.  After the issue 82 fix these windows carry no
++             * WM_TRANSIENT_FOR, so a UTILITY type gives KWin no stacking anchor
++             * and the WM holds the window above normal windows → popups stay
++             * topmost over unrelated focused windows.  Vanilla upstream has no
++             * UTILITY branch here and leaves them NORMAL (no symptom).  Verified
++             * xprop custom-vs-vanilla on KM88: across all ownerless TOOLWINDOW
++             * children only _NET_WM_WINDOW_TYPE differs (UTILITY vs NORMAL);
++             * transient_for, window_group and _NET_WM_STATE are identical.
++             * DComp apps (Trinity standalone via anchor_is_dcomp, embedded IFX
++             * popups via the desktop dcomp_active flag) still take DROPDOWN_MENU
++             * above, so issue 2 / popup-flicker coverage is unchanged. */
++            window_type = x11drv_atom(_NET_WM_WINDOW_TYPE_NORMAL);
++    }
+     else
+         window_type = x11drv_atom(_NET_WM_WINDOW_TYPE_NORMAL);
+ 
+@@ -1713,8 +1897,32 @@ static void window_set_wm_state( struct x11drv_win_data *data, UINT new_state, B
+     if (new_state == NormalState)
+     {
+         /* try forcing activation if the window is supposed to be foreground or if it is fullscreen */
++        BOOL allow_focus;
+         if (data->hwnd == foreground || data->is_fullscreen) activate = TRUE;
+-        if (!activate) window_set_user_time( data, 0, TRUE );
++        allow_focus = activate;
++        /* A decorated, ownerless top-level that is not itself the foreground window is
++         * otherwise mapped with _NET_WM_USER_TIME=0 (the freedesktop "do not focus on
++         * map" hint), which strands it behind on the WM stack.  When the foreground
++         * window belongs to the SAME process the application is already in front and
++         * this is just its taskbar/main frame whose visible child holds the foreground
++         * (e.g. FL Studio's 1x1 WS_CAPTION container with a transient content child).
++         * Clear only the "do not focus" hint so the WM may bring the app forward on
++         * startup (issue 52) -- but do NOT set 'activate': that would additionally
++         * request a Win32 activation for the container and fight the foreground content
++         * child, producing a server-side activation ping-pong that hangs the app.
++         * Restricted to managed, non-embedded, ownerless, captioned windows so it never
++         * affects embedded VST3/DComp plugin frames, tool/popup windows, or splash
++         * screens (no WS_CAPTION). */
++        if (!allow_focus && foreground && data->managed && !data->embedded
++                 && (NtUserGetWindowLongW( data->hwnd, GWL_STYLE ) & WS_CAPTION)
++                 && !NtUserGetWindowRelative( data->hwnd, GW_OWNER ))
++        {
++            DWORD pid = 0, fg_pid = 0;
++            NtUserGetWindowThread( data->hwnd, &pid );
++            NtUserGetWindowThread( foreground, &fg_pid );
++            if (pid && pid == fg_pid) allow_focus = TRUE;
++        }
++        if (!allow_focus) window_set_user_time( data, 0, TRUE );
+         else
+         {
+             /* Some older Mutter versions get confused when mapping a window while another has focus
+@@ -1755,7 +1963,30 @@ static void window_set_wm_state( struct x11drv_win_data *data, UINT new_state, B
+     case MAKELONG(NormalState, WithdrawnState):
+     case MAKELONG(IconicState, WithdrawnState):
+         if (data->embedded) set_xembed_flags( data, 0 );
+-        else if (!data->managed) XUnmapWindow( data->display, data->whole_window );
++        else if (!data->managed)
++        {
++            /* Sync gdi_display before unmapping so any pending surface flush
++             * (XPutImage on gdi_display) from sibling DComp windows is
++             * completed by the X server before it processes the unmap.
++             * Without this, the X server may show stale backing-store content
++             * for the exposed area beneath the unmapped window, producing a
++             * 1-frame flash visible as popup/tooltip close flicker.
++             * (Same pattern as destroy_whole_window which does XSync before
++             * XDestroyWindow.)
++             *
++             * Intentionally unconditional for the unmanaged (override-redirect)
++             * unmap path rather than gated on a DComp marker: the flush we are
++             * waiting on belongs to *sibling* DComp windows, so a per-window
++             * gate on the window being unmapped would miss the common case (a
++             * plain tooltip/popup closing over a DComp plugin underneath) and
++             * reintroduce the flash.  A correct gate would need a global
++             * "DComp window mapped" indicator, which winex11 does not track; the
++             * cost here is a single local X server round-trip on popup close,
++             * which is not perceptible — not worth that machinery + regression
++             * risk for a hot-path that is already limited to unmanaged unmaps. */
++            XSync( gdi_display, False );
++            XUnmapWindow( data->display, data->whole_window );
++        }
+         else XWithdrawWindow( data->display, data->whole_window, data->vis.screen );
+         break;
+     case MAKELONG(NormalState, IconicState):
+@@ -1792,6 +2023,30 @@ static void window_set_managed( struct x11drv_win_data *data, BOOL new_managed )
+     if (!data->whole_window) return; /* no window, nothing to update */
+     if (old_managed == new_managed) return; /* states are the same, nothing to update */
+ 
++    /* Flipping to managed can only go through a WM_STATE unmap/remap round-trip,
++     * which yanks a mapped window off the screen and hands it to the window manager
++     * mid-use.  An app that pokes its open dropdown with an activating no-op
++     * SetWindowPos (NOSIZE|NOMOVE|NOZORDER without NOACTIVATE, a no-op on Windows)
++     * thereby turns the popup into a WM-managed dialog under the pointer: it flashes,
++     * eats the first click, and grows WM decorations.  The managed decision belongs to
++     * map time — a mapped window keeps its mode until it is withdrawn, and the next
++     * map re-evaluates it.
++     *
++     * data->managed deliberately stays FALSE, so a later WindowPosChanged on the same
++     * mapped window asks again and is refused again; that is cheaper than the
++     * unmap/remap round-trip it replaces.
++     *
++     * The legitimate flip paths are unaffected: make_window_embedded withdraws
++     * explicitly before flipping, and create_desktop_win_data runs on freshly
++     * allocated data — only X11DRV_WindowPosChanged reaches this with a mapped window.
++     *
++     * From shibco/ableton-linux patch 0039, written by shibco. */
++    if (data->desired_state.wm_state != WithdrawnState)
++    {
++        WARN( "window %p/%lx is mapped, refusing to make it managed\n", data->hwnd, data->whole_window );
++        return;
++    }
++
+     window_set_wm_state( data, WithdrawnState, FALSE ); /* no WM_STATE is pending, requested immediately */
+ 
+     data->managed = new_managed;
+@@ -2282,6 +2537,18 @@ static void sync_window_position( struct x11drv_win_data *data, UINT swp_flags,
+ 
+     new_rect = data->rects.visible;
+ 
++    /* For WS_CHILD windows with forced whole_window (non-desktop parent),
++     * data->rects.visible is parent-relative but window_set_config passes
++     * it through virtual_screen_to_root which expects screen coordinates.
++     * Convert to screen coords so the X11 window position is correct. */
++    if ((style & WS_CHILD) && data->whole_window)
++    {
++        HWND parent = NtUserGetAncestor( data->hwnd, GA_PARENT );
++        if (parent && parent != NtUserGetDesktopWindow())
++            NtUserMapWindowPoints( parent, 0, (POINT *)&new_rect, 2,
++                    NtUserGetWinMonitorDpi( data->hwnd, MDT_RAW_DPI ) );
++    }
++
+     /* if the window has been moved offscreen by the window manager, we didn't tell the Win32 side about it */
+     window_rect = window_rect_from_visible( old_rects, data->desired_state.rect );
+     if (data->is_offscreen) OffsetRect( &new_rect, window_rect.left - old_rects->window.left,
+@@ -2662,6 +2929,12 @@ static void create_whole_window( struct x11drv_win_data *data )
+     if (!NtUserGetLayeredWindowAttributes( data->hwnd, &key, &alpha, &layered_flags )) layered_flags = 0;
+     sync_window_opacity( data->display, data->whole_window, alpha, layered_flags );
+ 
++    /* give the window a visible default arrow cursor so that windows which
++       never set a cursor of their own (e.g. cross-process embedded WebView2
++       surfaces) don't end up blank once WM reparenting breaks the X11 cursor
++       inheritance to the owner window */
++    XDefineCursor( data->display, data->whole_window, get_default_cursor() );
++
+     XFlush( data->display );  /* make sure the window exists before we start painting to it */
+ 
+ done:
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+index 2e79e893..dd7e915c 100644
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -210,6 +210,7 @@ extern SHORT X11DRV_VkKeyScanEx( WCHAR wChar, HKL hkl );
+ extern void X11DRV_NotifyIMEStatus( HWND hwnd, UINT status );
+ extern BOOL X11DRV_SetIMECompositionRect( HWND hwnd, RECT rect );
+ extern void X11DRV_DestroyCursorIcon( HCURSOR handle );
++extern Cursor get_default_cursor(void);
+ extern void X11DRV_SetCursor( HWND hwnd, HCURSOR handle );
+ extern BOOL X11DRV_SetCursorPos( INT x, INT y );
+ extern BOOL X11DRV_ClipCursor( const RECT *clip, BOOL reset );
+@@ -537,6 +538,7 @@ enum x11drv_atoms
+     XATOM__NET_WM_WINDOW_TYPE_DIALOG,
+     XATOM__NET_WM_WINDOW_TYPE_NORMAL,
+     XATOM__NET_WM_WINDOW_TYPE_UTILITY,
++    XATOM__NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
+     XATOM__NET_WORKAREA,
+     XATOM__GTK_WORKAREAS_D0,
+     XATOM__XEMBED,
+diff --git a/dlls/winex11.drv/x11drv_main.c b/dlls/winex11.drv/x11drv_main.c
+index 322cb33c..6420cc4d 100644
+--- a/dlls/winex11.drv/x11drv_main.c
++++ b/dlls/winex11.drv/x11drv_main.c
+@@ -162,6 +162,7 @@ static const char * const atom_names[NB_XATOMS - FIRST_XATOM] =
+     "_NET_WM_WINDOW_TYPE_DIALOG",
+     "_NET_WM_WINDOW_TYPE_NORMAL",
+     "_NET_WM_WINDOW_TYPE_UTILITY",
++    "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
+     "_NET_WORKAREA",
+     "_GTK_WORKAREAS_D0",
+     "_XEMBED",
+diff --git a/server/queue.c b/server/queue.c
+index 7a5f74ce..e7c3315a 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -4262,7 +4262,17 @@ DECL_HANDLER(set_cursor)
+     if (req->flags & SET_CURSOR_NOCLIP) set_clip_rectangle( desktop, NULL, SET_CURSOR_NOCLIP, 0 );
+ 
+     new_cursor = input_shm->cursor_count < 0 ? 0 : input_shm->cursor;
+-    if (prev_cursor != new_cursor) update_desktop_cursor_handle( desktop, input, new_cursor );
++    /* A hide/show transition must reach the driver even when the effective
++     * cursor stays zero.  An application that hides the pointer with
++     * ShowCursor(FALSE) and also sets a null cursor while it is hidden leaves
++     * both prev_cursor and new_cursor at zero on ShowCursor(TRUE), so the
++     * handle comparison alone sends nothing and the pointer stays invisible
++     * until an unrelated event sets a cursor again.  WebView2 content does
++     * exactly this while dragging a slider.  A null handle resolves to the
++     * window class cursor, then IDC_ARROW, on the client side. */
++    if (prev_cursor != new_cursor
++            || (reply->prev_count < 0) != (input_shm->cursor_count < 0))
++        update_desktop_cursor_handle( desktop, input, new_cursor );
+ 
+     reply->new_x       = desktop_shm->cursor.x;
+     reply->new_y       = desktop_shm->cursor.y;
