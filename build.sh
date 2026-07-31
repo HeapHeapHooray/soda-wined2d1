@@ -6,7 +6,7 @@
 # bottlesdevs/wine) and injects the Direct2D 1.3 / DirectComposition patch
 # series from patches/*.mypatch as wine-tkg user patches.
 #
-# Result: dist/soda-d2d1-10.0-1-x86_64.tar.xz — extract into
+# Result: dist/soda-d2d1-11.0-2-x86_64.tar.xz — extract into
 #         ~/.local/share/bottles/runners/ and select it in Bottles.
 #
 # Requirements: a Debian/Ubuntu-ish host (the wine-tkg dependency autoresolver
@@ -14,10 +14,11 @@
 # =============================================================================
 set -euo pipefail
 
-PKG_BASENAME="soda-d2d1-10.0-1"
+PKG_BASENAME="soda-d2d1-11.0-2"
 # The wine source: Valve's Proton wine bleeding-edge tag pinned by the
-# bottlesdevs soda recipe (build-tools: runners/vaniglia/wine-tkg-valve.cfg).
-BLEEDING_TAG="experimental-wine-bleeding-edge-10.0-272530-20251119-p75f008-w4a5ca6-d392494-vc01c8b"
+# bottlesdevs soda recipe (build-tools: runners/vaniglia/wine-tkg-valve.cfg,
+# commit fcba104217 "update Soda recipe to Wine 11").
+BLEEDING_TAG="experimental-wine-bleeding-edge-11.0-406792-20260730-p6ed41e-w6eabc7-d6227b6-v651f17"
 RECIPE_URL="https://raw.githubusercontent.com/bottlesdevs/build-tools/main/runners/vaniglia/wine-tkg-valve.cfg"
 
 cd "$(dirname "$0")"
@@ -40,17 +41,10 @@ sed -i 's/_LOCAL_PRESET=""/_LOCAL_PRESET="valve-exp-bleeding"/g' customization.c
 # NOTE: the bottlesdevs recipe sets _bleeding_tag in the external cfg, but the
 # valve-exp-bleeding profile is sourced *after* it and resets it, so the pin
 # never takes effect. Force it in the profile file, which is sourced last.
-# Also align _plain_version/_proton_branch with the 10.0-based tag.
+# (tkg has no de-steamify patch for 11.0 yet; the valve hotfixer just warns
+# "No de-steamify patch for this version... Yet" and skips it — harmless.)
 PROFILE="wine-tkg-profiles/wine-tkg-valve-exp-bleeding.cfg"
 sed -i "s|_bleeding_tag=\".*\"|_bleeding_tag=\"$BLEEDING_TAG\"|" "$PROFILE"
-sed -i 's|experimental_11.0|experimental_10.0|g' "$PROFILE"
-
-# --- 4. Drop the de-steamify hotfix ------------------------------------------
-# tkg's de-steamify-10.0 patch currently fails 2 hunks against this bleeding
-# tag (unrelated to the d2d1 series). It only strips Steam integration, which
-# is harmless to keep under Bottles, so remove it to keep the build green.
-# Delete this block if tkg fixes the patch upstream.
-rm -f wine-tkg-patches/hotfixes/valve/de-steamify/10.0/de-steamify-valve-exp-bleeding.mypatch
 
 # --- 5. Fetch the official soda recipe, like build-soda.yml does -------------
 mkdir -p "$HOME/.config/frogminer"

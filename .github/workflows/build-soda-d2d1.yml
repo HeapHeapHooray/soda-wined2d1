@@ -6,10 +6,10 @@ on:
       - 'main'
   workflow_dispatch:
 env:
-  WINE_VERSION: '10.0'
+  WINE_VERSION: '11.0'
   PKG_BASENAME: 'soda-d2d1'
-  REVISION: '1'
-  BLEEDING_TAG: 'experimental-wine-bleeding-edge-10.0-272530-20251119-p75f008-w4a5ca6-d392494-vc01c8b'
+  REVISION: '2'
+  BLEEDING_TAG: 'experimental-wine-bleeding-edge-11.0-406792-20260730-p6ed41e-w6eabc7-d6227b6-v651f17'
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -40,13 +40,10 @@ jobs:
         run: |
           # The valve-exp-bleeding profile is sourced after the external recipe
           # and would reset _bleeding_tag to "", so pin it in the profile itself.
+          # (tkg has no de-steamify patch for 11.0 yet; its hotfixer just warns
+          # and skips it.)
           PROFILE="wine-tkg-profiles/wine-tkg-valve-exp-bleeding.cfg"
           sed -i "s|_bleeding_tag=\".*\"|_bleeding_tag=\"$BLEEDING_TAG\"|" "$PROFILE"
-          sed -i 's|experimental_11.0|experimental_10.0|g' "$PROFILE"
-          # de-steamify-10.0 currently fails 2 hunks against this bleeding tag
-          # (unrelated to the d2d1 series); it only strips Steam integration,
-          # which is harmless to keep under Bottles.
-          rm -f wine-tkg-patches/hotfixes/valve/de-steamify/10.0/de-steamify-valve-exp-bleeding.mypatch
 
       - name: get/set the soda recipe
         working-directory: /home/runner/.config/frogminer/

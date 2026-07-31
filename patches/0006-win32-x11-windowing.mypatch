@@ -1,5 +1,5 @@
 diff --git a/dlls/comctl32/tooltips.c b/dlls/comctl32/tooltips.c
-index 1d8ac346..0c56d3f6 100644
+index 876736b1..fc48c4af 100644
 --- a/dlls/comctl32/tooltips.c
 +++ b/dlls/comctl32/tooltips.c
 @@ -1481,6 +1481,14 @@ TOOLTIPS_Pop (TOOLTIPS_INFO *infoPtr)
@@ -18,10 +18,10 @@ index 1d8ac346..0c56d3f6 100644
  }
  
 diff --git a/dlls/ntdll/heap.c b/dlls/ntdll/heap.c
-index 4ff7405f..b3b639c9 100644
+index 1e99799d..d6fa1beb 100644
 --- a/dlls/ntdll/heap.c
 +++ b/dlls/ntdll/heap.c
-@@ -955,6 +955,10 @@ static NTSTATUS heap_free_block( struct heap *heap, ULONG flags, struct block *b
+@@ -956,6 +956,10 @@ static NTSTATUS heap_free_block( struct heap *heap, ULONG flags, struct block *b
      /* keep room for a full committed block as hysteresis */
      if (!next) subheap_decommit( heap, subheap, (char *)((struct entry *)block + 1) + REGION_ALIGN );
  
@@ -33,10 +33,10 @@ index 4ff7405f..b3b639c9 100644
  }
  
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 7378c967..09da2534 100644
+index d5b93415..1beb94dc 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -5281,7 +5281,11 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+@@ -5501,7 +5501,11 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
      else if (type & MEM_RESET)
      {
          if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
@@ -49,7 +49,7 @@ index 7378c967..09da2534 100644
      else  /* commit the pages */
      {
 diff --git a/dlls/ole32/ole2.c b/dlls/ole32/ole2.c
-index f4672b70..977eb128 100644
+index b37b5b0e..9b20d59f 100644
 --- a/dlls/ole32/ole2.c
 +++ b/dlls/ole32/ole2.c
 @@ -618,6 +618,7 @@ HRESULT WINAPI RegisterDragDrop(HWND hwnd, LPDROPTARGET pDropTarget)
@@ -77,7 +77,7 @@ index f4672b70..977eb128 100644
    if (!(map = get_droptarget_handle(hwnd)))
      return DRAGDROP_E_NOTREGISTERED;
 diff --git a/dlls/shell32/shell32_main.h b/dlls/shell32/shell32_main.h
-index 6b5575c6..f942f9ec 100644
+index 299fc197..7de55279 100644
 --- a/dlls/shell32/shell32_main.h
 +++ b/dlls/shell32/shell32_main.h
 @@ -103,6 +103,7 @@ HRESULT WINAPI ExplorerBrowser_Constructor(IUnknown *pUnkOuter, REFIID riid, LPV
@@ -85,9 +85,9 @@ index 6b5575c6..f942f9ec 100644
  HRESULT WINAPI IFileOperation_Constructor(IUnknown *outer, REFIID riid, void **out);
  HRESULT WINAPI ActiveDesktop_Constructor(IUnknown *outer, REFIID riid, void **out);
 +HRESULT WINAPI VirtualDesktopManager_Constructor(IUnknown *outer, REFIID riid, void **out);
+ HRESULT WINAPI EnumerableObjectCollection_Constructor(IUnknown *outer, REFIID riid, void **obj);
  
  extern HRESULT CPanel_GetIconLocationW(LPCITEMIDLIST, LPWSTR, UINT, int*);
- HRESULT WINAPI CPanel_ExtractIconA(LPITEMIDLIST pidl, LPCSTR pszFile, UINT nIconIndex, HICON *phiconLarge, HICON *phiconSmall, UINT nIconSize);
 diff --git a/dlls/shell32/virtualdesktop.c b/dlls/shell32/virtualdesktop.c
 new file mode 100644
 index 00000000..94d1e616
@@ -264,7 +264,7 @@ index 00000000..94d1e616
 +    return hr;
 +}
 diff --git a/dlls/win32u/cursoricon.c b/dlls/win32u/cursoricon.c
-index fedd122e..506af20c 100644
+index 88654006..7f53f94e 100644
 --- a/dlls/win32u/cursoricon.c
 +++ b/dlls/win32u/cursoricon.c
 @@ -77,6 +77,22 @@ static struct cursoricon_object *get_icon_ptr( HICON handle )
@@ -291,23 +291,23 @@ index fedd122e..506af20c 100644
      return TRUE;
  }
 diff --git a/dlls/win32u/dce.c b/dlls/win32u/dce.c
-index 506f531a..14187cbc 100644
+index 6dbf3beb..0005d747 100644
 --- a/dlls/win32u/dce.c
 +++ b/dlls/win32u/dce.c
-@@ -549,6 +549,8 @@ W32KAPI struct window_surface *window_surface_create( UINT size, const struct wi
+@@ -551,7 +551,7 @@ W32KAPI struct window_surface *window_surface_create( UINT size, const struct wi
  
      pthread_mutex_init( &surface->mutex, NULL );
  
+-    memset( window_surface_get_color( surface, info ), 0xff, info->bmiHeader.biSizeImage );
 +    memset( window_surface_get_color( surface, info ), 0x00, info->bmiHeader.biSizeImage );
-+
+ 
      TRACE( "created surface %p for hwnd %p rect %s\n", surface, hwnd, wine_dbgstr_rect( &surface->rect ) );
      return surface;
- }
 diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
-index c8404172..abc63fa0 100644
+index da1d31d0..2a599bc8 100644
 --- a/dlls/win32u/window.c
 +++ b/dlls/win32u/window.c
-@@ -3896,6 +3896,18 @@ BOOL set_window_pos( WINDOWPOS *winpos, int parent_x, int parent_y )
+@@ -3991,6 +3991,18 @@ BOOL set_window_pos( WINDOWPOS *winpos, int parent_x, int parent_y )
      }
      if (surface) window_surface_release( surface );
  
@@ -327,7 +327,7 @@ index c8404172..abc63fa0 100644
      {
          NtUserNotifyWinEvent( EVENT_OBJECT_HIDE, winpos->hwnd, 0, 0 );
 diff --git a/dlls/winealsa.drv/alsa.c b/dlls/winealsa.drv/alsa.c
-index 046b447a..4af48a91 100644
+index aea4ddfa..9b0aca43 100644
 --- a/dlls/winealsa.drv/alsa.c
 +++ b/dlls/winealsa.drv/alsa.c
 @@ -731,6 +731,17 @@ static HRESULT map_channels(EDataFlow flow, const WAVEFORMATEX *fmt, int *alsa_c
@@ -361,19 +361,20 @@ index 046b447a..4af48a91 100644
      /* Buffer 4 ALSA periods if large enough, else 4 mmdevapi periods */
      stream->alsa_bufsize_frames = stream->mmdev_period_frames * 4;
      if(err < 0 || alsa_period_us < params->period / 10)
-@@ -1957,6 +1974,10 @@ static NTSTATUS alsa_is_format_supported(void *args)
-     }else if(params->fmt_in->nChannels < min){
+@@ -1926,6 +1943,11 @@ static NTSTATUS alsa_is_format_supported(void *args)
          params->result = S_FALSE;
-         closest->Format.nChannels = min;
-+    }else if(params->fmt_in->nChannels > 32){
+     else if(params->fmt_in->nChannels < min)
+         params->result = S_FALSE;
++    else if(params->fmt_in->nChannels > 32){
 +        WARN("Channel count %u exceeds supported limit.\n", params->fmt_in->nChannels);
 +        params->result = S_FALSE;
 +        goto exit;
-     }
++    }
  
      map_channels(params->flow, params->fmt_in, &alsa_channels, alsa_channel_map);
+ 
 diff --git a/dlls/winex11.drv/bitblt.c b/dlls/winex11.drv/bitblt.c
-index dd9ddb27..e54df1ff 100644
+index ad3a8635..106f3676 100644
 --- a/dlls/winex11.drv/bitblt.c
 +++ b/dlls/winex11.drv/bitblt.c
 @@ -1866,6 +1866,37 @@ static BOOL x11drv_surface_flush( struct window_surface *window_surface, const R
@@ -415,24 +416,24 @@ index dd9ddb27..e54df1ff 100644
          XPutImage( gdi_display, surface->window, surface->gc, ximage, dirty->left,
                     dirty->top, rect.left + dirty->left, rect.top + dirty->top,
 diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
-index 57af26d2..957e7738 100644
+index ee04237e..fd871b9d 100644
 --- a/dlls/winex11.drv/init.c
 +++ b/dlls/winex11.drv/init.c
-@@ -220,6 +220,10 @@ static BOOL needs_client_window_clipping( HWND hwnd )
+@@ -244,6 +244,10 @@ static BOOL enable_fullscreen_hack( HWND hwnd )
  
- BOOL needs_offscreen_rendering( HWND hwnd, BOOL known_child, BOOL check_gamma )
+ BOOL needs_offscreen_rendering( HWND hwnd )
  {
 +    static const WCHAR dcomp_target_propW[] =
 +        {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','r','g','e','t',0};
 +    static const WCHAR d3d_hwnd_target_propW[] =
 +        {'_','_','w','i','n','e','_','d','3','d','_','h','w','n','d','_','t','a','r','g','e','t',0};
-     static int no_child_clipping_cached = -1;
+     UINT style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
      struct window_surface *surface;
-     DWORD layered_flags;
-@@ -259,7 +263,35 @@ BOOL needs_offscreen_rendering( HWND hwnd, BOOL known_child, BOOL check_gamma )
-     if (NtUserGetDpiForWindow( hwnd ) != NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI )
-         && !enable_fullscreen_hack( hwnd, check_gamma ))
-         return TRUE; /* needs DPI scaling */
+     struct x11drv_win_data *data;
+@@ -271,7 +275,35 @@ BOOL needs_offscreen_rendering( HWND hwnd )
+     if (needs_offscreen) return needs_offscreen;
+ 
+     if (NtUserGetDpiForWindow( hwnd ) != NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI ) && !enable_fullscreen_hack( hwnd )) return TRUE; /* needs DPI scaling */
 -    if (NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow()) return TRUE; /* child window, needs compositing */
 +    if (NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow())
 +    {
@@ -463,11 +464,19 @@ index 57af26d2..957e7738 100644
 +        if (NtUserGetProp( hwnd, d3d_hwnd_target_propW )) return FALSE;
 +        return TRUE; /* child window, needs compositing */
 +    }
-     if (no_child_clipping_cached) return FALSE;
-     if (NtUserGetWindowRelative( hwnd, GW_CHILD ) || known_child) return needs_client_window_clipping( hwnd ); /* window has children, needs compositing */
+     if (NtUserGetWindowRelative( hwnd, GW_CHILD )) return needs_client_window_clipping( hwnd ); /* window has children, needs compositing */
      return FALSE;
+ }
+@@ -499,6 +531,7 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
+         return;
+     }
+ 
++    if (!surface->hdc_dst) return; /* non-offscreen, GL presents directly */
+     window = X11DRV_get_whole_window( toplevel );
+ 
+     if (NtUserGetPresentRect( toplevel, &rect_dst, -1 /* raw dpi */ ))
 diff --git a/dlls/winex11.drv/mouse.c b/dlls/winex11.drv/mouse.c
-index 6d59de4b..1708ea8c 100644
+index e1a5e70a..2426c9c6 100644
 --- a/dlls/winex11.drv/mouse.c
 +++ b/dlls/winex11.drv/mouse.c
 @@ -203,6 +203,32 @@ static Cursor get_empty_cursor(void)
@@ -503,7 +512,7 @@ index 6d59de4b..1708ea8c 100644
  /***********************************************************************
   *		set_window_cursor
   */
-@@ -1612,6 +1638,18 @@ BOOL X11DRV_ButtonPress( HWND hwnd, XEvent *xev )
+@@ -1608,6 +1634,18 @@ BOOL X11DRV_ButtonPress( HWND hwnd, XEvent *xev )
      input.mi.time        = EVENT_x11_time_to_win32_time( event->time );
      input.mi.dwExtraInfo = 0;
  
@@ -522,7 +531,7 @@ index 6d59de4b..1708ea8c 100644
      if ((data = get_win_data( hwnd )))
      {
          window_set_user_time( data, event->time, FALSE );
-@@ -1644,6 +1682,16 @@ BOOL X11DRV_ButtonRelease( HWND hwnd, XEvent *xev )
+@@ -1640,6 +1678,16 @@ BOOL X11DRV_ButtonRelease( HWND hwnd, XEvent *xev )
      input.mi.time        = EVENT_x11_time_to_win32_time( event->time );
      input.mi.dwExtraInfo = 0;
  
@@ -540,7 +549,7 @@ index 6d59de4b..1708ea8c 100644
      send_mouse_input( hwnd, event->window, event->state, &input );
      return TRUE;
 diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
-index 21db970f..31f104f3 100644
+index 991cf5e9..14130bfc 100644
 --- a/dlls/winex11.drv/window.c
 +++ b/dlls/winex11.drv/window.c
 @@ -106,6 +106,19 @@ static const WCHAR clip_window_prop[] =
@@ -563,22 +572,16 @@ index 21db970f..31f104f3 100644
  
  static const char *debugstr_mwm_hints( const MwmHints *hints )
  {
-@@ -536,17 +549,70 @@ static unsigned long get_mwm_decorations( struct x11drv_win_data *data, DWORD st
-  */
- static int get_window_attributes( struct x11drv_win_data *data, XSetWindowAttributes *attr )
- {
-+    DWORD ex_style = NtUserGetWindowLongW( data->hwnd, GWL_EXSTYLE );
-+
-     attr->colormap          = data->whole_colormap ? data->whole_colormap : default_colormap;
-     attr->save_under        = ((NtUserGetClassLongW( data->hwnd, GCL_STYLE ) & CS_SAVEBITS) != 0);
+@@ -574,13 +587,64 @@ static int get_window_attributes( struct x11drv_win_data *data, XSetWindowAttrib
      attr->bit_gravity       = NorthWestGravity;
      attr->backing_store     = NotUseful;
      attr->border_pixel      = 0;
 -    attr->background_pixel  = 0;
-     attr->event_mask        = (ExposureMask | PointerMotionMask |
-                                ButtonPressMask | ButtonReleaseMask | EnterWindowMask |
-                                KeyPressMask | KeyReleaseMask | FocusChangeMask |
-                                KeymapStateMask | StructureNotifyMask | PropertyChangeMask);
+     attr->event_mask        = (ExposureMask | KeyPressMask | KeyReleaseMask |
+                                FocusChangeMask | KeymapStateMask | StructureNotifyMask | PropertyChangeMask);
+     /* for transparent windows, exclude mouse events to allow mouse pass-through */
+     if (!(ex_style & WS_EX_TRANSPARENT)) attr->event_mask |= (PointerMotionMask | ButtonPressMask |
+                                                               ButtonReleaseMask | EnterWindowMask);
  
 +    /* DComp windows: use None background_pixmap to avoid black flash on map.
 +     * Without this, XMapWindow shows background_pixel=0 (black) for 1 frame
@@ -635,15 +638,15 @@ index 21db970f..31f104f3 100644
      return (CWSaveUnder | CWColormap | CWBorderPixel | CWBackPixel |
              CWEventMask | CWBitGravity | CWBackingStore);
  }
-@@ -1073,6 +1139,7 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
+@@ -1173,6 +1237,7 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
      Window group_leader = data->whole_window;
      HWND owner = NtUserGetWindowRelative( data->hwnd, GW_OWNER );
      Window owner_win = 0;
 +    BOOL owner_from_heuristic = FALSE, anchor_is_dcomp = FALSE;
      XWMHints *wm_hints;
-     Atom window_type;
  
-@@ -1082,10 +1149,78 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
+     if (owner)
+@@ -1181,10 +1246,78 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
          owner_win = X11DRV_get_whole_window( owner );
      }
  
@@ -723,10 +726,10 @@ index 21db970f..31f104f3 100644
      }
  
      /* Only use dialog type for owned popups. Metacity allows making fullscreen
-@@ -1094,6 +1229,55 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
+@@ -1193,6 +1326,55 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
       */
      if (((style & WS_POPUP) || (ex_style & WS_EX_DLGMODALFRAME)) && owner)
-         window_type = x11drv_atom(_NET_WM_WINDOW_TYPE_DIALOG);
+         window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_DIALOG );
 +    else if ((style & WS_POPUP) && (ex_style & WS_EX_TOOLWINDOW) && !owner
 +            && !(style & WS_CAPTION))
 +    {
@@ -759,7 +762,7 @@ index 21db970f..31f104f3 100644
 +         * not regress). */
 +        if (NtUserGetProp( data->hwnd, dcomp_popup_parent_prop ) || anchor_is_dcomp
 +                || NtUserGetProp( NtUserGetDesktopWindow(), dcomp_active_prop ))
-+            window_type = x11drv_atom(_NET_WM_WINDOW_TYPE_DROPDOWN_MENU);
++            window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_DROPDOWN_MENU );
 +        else
 +            /* Issue 84: ownerless TOOLWINDOW popups of non-DComp apps (KM88
 +             * Editor, other pure-D2D/JUCE standalone editors) use NORMAL, not
@@ -774,18 +777,17 @@ index 21db970f..31f104f3 100644
 +             * DComp apps (Trinity standalone via anchor_is_dcomp, embedded IFX
 +             * popups via the desktop dcomp_active flag) still take DROPDOWN_MENU
 +             * above, so issue 2 / popup-flicker coverage is unchanged. */
-+            window_type = x11drv_atom(_NET_WM_WINDOW_TYPE_NORMAL);
++            window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_NORMAL );
 +    }
      else
-         window_type = x11drv_atom(_NET_WM_WINDOW_TYPE_NORMAL);
+         window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_NORMAL );
  
-@@ -1713,8 +1897,32 @@ static void window_set_wm_state( struct x11drv_win_data *data, UINT new_state, B
+@@ -1849,15 +2031,39 @@ static void window_set_wm_state( struct x11drv_win_data *data, UINT new_state, B
      if (new_state == NormalState)
      {
          /* try forcing activation if the window is supposed to be foreground or if it is fullscreen */
 +        BOOL allow_focus;
          if (data->hwnd == foreground || data->is_fullscreen) activate = TRUE;
--        if (!activate) window_set_user_time( data, 0, TRUE );
 +        allow_focus = activate;
 +        /* A decorated, ownerless top-level that is not itself the foreground window is
 +         * otherwise mapped with _NET_WM_USER_TIME=0 (the freedesktop "do not focus on
@@ -809,11 +811,20 @@ index 21db970f..31f104f3 100644
 +            NtUserGetWindowThread( foreground, &fg_pid );
 +            if (pid && pid == fg_pid) allow_focus = TRUE;
 +        }
-+        if (!allow_focus) window_set_user_time( data, 0, TRUE );
-         else
-         {
-             /* Some older Mutter versions get confused when mapping a window while another has focus
-@@ -1755,7 +1963,30 @@ static void window_set_wm_state( struct x11drv_win_data *data, UINT new_state, B
+         /* Some older Mutter versions get confused when mapping a window while another has focus
+          * and if there's another window with _NET_WM_STATE_ABOVE. It then decides that the newly
+          * mapped window doesn't deserve to be raised or focused, even if the topmost window isn't
+          * the one with focus and even if it only slightly overlaps it. Reset focus before mapping
+          * the window to force it to be focused instead.
+          */
+-        if (activate && X11DRV_HasWindowManager( "Mutter" )) XSetInputFocus( data->display, None, RevertToNone, CurrentTime );
+-        window_set_user_time( data, activate ? -1 : 0, TRUE );
++        if (allow_focus && X11DRV_HasWindowManager( "Mutter" )) XSetInputFocus( data->display, None, RevertToNone, CurrentTime );
++        window_set_user_time( data, allow_focus ? -1 : 0, TRUE );
+     }
+ 
+     data->pending_state.wm_state = new_state;
+@@ -1887,7 +2093,30 @@ static void window_set_wm_state( struct x11drv_win_data *data, UINT new_state, B
      case MAKELONG(NormalState, WithdrawnState):
      case MAKELONG(IconicState, WithdrawnState):
          if (data->embedded) set_xembed_flags( data, 0 );
@@ -845,9 +856,9 @@ index 21db970f..31f104f3 100644
          else XWithdrawWindow( data->display, data->whole_window, data->vis.screen );
          break;
      case MAKELONG(NormalState, IconicState):
-@@ -1792,6 +2023,30 @@ static void window_set_managed( struct x11drv_win_data *data, BOOL new_managed )
-     if (!data->whole_window) return; /* no window, nothing to update */
-     if (old_managed == new_managed) return; /* states are the same, nothing to update */
+@@ -1927,6 +2156,30 @@ static void window_set_managed( struct x11drv_win_data *data, BOOL new_managed )
+         return;
+     }
  
 +    /* Flipping to managed can only go through a WM_STATE unmap/remap round-trip,
 +     * which yanks a mapped window off the screen and hands it to the window manager
@@ -876,7 +887,7 @@ index 21db970f..31f104f3 100644
      window_set_wm_state( data, WithdrawnState, FALSE ); /* no WM_STATE is pending, requested immediately */
  
      data->managed = new_managed;
-@@ -2282,6 +2537,18 @@ static void sync_window_position( struct x11drv_win_data *data, UINT swp_flags,
+@@ -2487,6 +2740,18 @@ static void sync_window_position( struct x11drv_win_data *data, UINT swp_flags,
  
      new_rect = data->rects.visible;
  
@@ -895,9 +906,9 @@ index 21db970f..31f104f3 100644
      /* if the window has been moved offscreen by the window manager, we didn't tell the Win32 side about it */
      window_rect = window_rect_from_visible( old_rects, data->desired_state.rect );
      if (data->is_offscreen) OffsetRect( &new_rect, window_rect.left - old_rects->window.left,
-@@ -2662,6 +2929,12 @@ static void create_whole_window( struct x11drv_win_data *data )
-     if (!NtUserGetLayeredWindowAttributes( data->hwnd, &key, &alpha, &layered_flags )) layered_flags = 0;
+@@ -2836,6 +3101,12 @@ static void create_whole_window( struct x11drv_win_data *data )
      sync_window_opacity( data->display, data->whole_window, alpha, layered_flags );
+     sync_window_input_shape( data );
  
 +    /* give the window a visible default arrow cursor so that windows which
 +       never set a cursor of their own (e.g. cross-process embedded WebView2
@@ -909,10 +920,10 @@ index 21db970f..31f104f3 100644
  
  done:
 diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
-index 2e79e893..dd7e915c 100644
+index 41fc5153..073169b2 100644
 --- a/dlls/winex11.drv/x11drv.h
 +++ b/dlls/winex11.drv/x11drv.h
-@@ -210,6 +210,7 @@ extern SHORT X11DRV_VkKeyScanEx( WCHAR wChar, HKL hkl );
+@@ -214,6 +214,7 @@ extern SHORT X11DRV_VkKeyScanEx( WCHAR wChar, HKL hkl );
  extern void X11DRV_NotifyIMEStatus( HWND hwnd, UINT status );
  extern BOOL X11DRV_SetIMECompositionRect( HWND hwnd, RECT rect );
  extern void X11DRV_DestroyCursorIcon( HCURSOR handle );
@@ -920,7 +931,7 @@ index 2e79e893..dd7e915c 100644
  extern void X11DRV_SetCursor( HWND hwnd, HCURSOR handle );
  extern BOOL X11DRV_SetCursorPos( INT x, INT y );
  extern BOOL X11DRV_ClipCursor( const RECT *clip, BOOL reset );
-@@ -537,6 +538,7 @@ enum x11drv_atoms
+@@ -549,6 +550,7 @@ enum x11drv_atoms
      XATOM__NET_WM_WINDOW_TYPE_DIALOG,
      XATOM__NET_WM_WINDOW_TYPE_NORMAL,
      XATOM__NET_WM_WINDOW_TYPE_UTILITY,
@@ -929,10 +940,10 @@ index 2e79e893..dd7e915c 100644
      XATOM__GTK_WORKAREAS_D0,
      XATOM__XEMBED,
 diff --git a/dlls/winex11.drv/x11drv_main.c b/dlls/winex11.drv/x11drv_main.c
-index 322cb33c..6420cc4d 100644
+index 0ddf6cf1..74a8d770 100644
 --- a/dlls/winex11.drv/x11drv_main.c
 +++ b/dlls/winex11.drv/x11drv_main.c
-@@ -162,6 +162,7 @@ static const char * const atom_names[NB_XATOMS - FIRST_XATOM] =
+@@ -166,6 +166,7 @@ const char * const X11DRV_atom_names[NB_XATOMS - FIRST_XATOM] =
      "_NET_WM_WINDOW_TYPE_DIALOG",
      "_NET_WM_WINDOW_TYPE_NORMAL",
      "_NET_WM_WINDOW_TYPE_UTILITY",
@@ -941,10 +952,10 @@ index 322cb33c..6420cc4d 100644
      "_GTK_WORKAREAS_D0",
      "_XEMBED",
 diff --git a/server/queue.c b/server/queue.c
-index 7a5f74ce..e7c3315a 100644
+index 14124112..5b7a67d6 100644
 --- a/server/queue.c
 +++ b/server/queue.c
-@@ -4262,7 +4262,17 @@ DECL_HANDLER(set_cursor)
+@@ -4199,7 +4199,17 @@ DECL_HANDLER(set_cursor)
      if (req->flags & SET_CURSOR_NOCLIP) set_clip_rectangle( desktop, NULL, SET_CURSOR_NOCLIP, 0 );
  
      new_cursor = input_shm->cursor_count < 0 ? 0 : input_shm->cursor;

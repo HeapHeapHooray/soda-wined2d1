@@ -11,10 +11,10 @@ index 27db1f63..edb91813 100644
  	shader.c \
  	state.c \
 diff --git a/dlls/d3d11/d3d11_private.h b/dlls/d3d11/d3d11_private.h
-index 68745e3b..5793657a 100644
+index d9cb912a..e006660a 100644
 --- a/dlls/d3d11/d3d11_private.h
 +++ b/dlls/d3d11/d3d11_private.h
-@@ -516,6 +516,13 @@ struct d3d_query
+@@ -522,6 +522,13 @@ struct d3d_query
  HRESULT d3d_query_create(struct d3d_device *device, const D3D11_QUERY_DESC *desc, BOOL predicate,
          struct d3d_query **query);
  struct d3d_query *unsafe_impl_from_ID3D11Query(ID3D11Query *iface);
@@ -29,10 +29,10 @@ index 68745e3b..5793657a 100644
  struct d3d_query *unsafe_impl_from_ID3D11Asynchronous(ID3D11Asynchronous *iface);
  
 diff --git a/dlls/d3d11/device.c b/dlls/d3d11/device.c
-index 2c6e4f46..f83e55c2 100644
+index 60ce120c..8e78bd8c 100644
 --- a/dlls/d3d11/device.c
 +++ b/dlls/d3d11/device.c
-@@ -1520,7 +1520,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_ResolveSubresource(ID3D11Devi
+@@ -1523,7 +1523,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_ResolveSubresource(ID3D11Devi
      wined3d_format = wined3dformat_from_dxgi_format(format);
      wined3d_device_context_resolve_sub_resource(context->wined3d_context,
              wined3d_dst_resource, dst_subresource_idx,
@@ -40,8 +40,87 @@ index 2c6e4f46..f83e55c2 100644
 +            wined3d_src_resource, src_subresource_idx, WINED3D_BLT_RAW, wined3d_format);
  }
  
- static void STDMETHODCALLTYPE d3d11_device_context_ExecuteCommandList(ID3D11DeviceContext1 *iface,
-@@ -5840,7 +5840,7 @@ static void STDMETHODCALLTYPE d3d10_device_ResolveSubresource(ID3D10Device1 *ifa
+ static void STDMETHODCALLTYPE d3d11_device_context_ExecuteCommandList(ID3D11DeviceContext4 *iface,
+@@ -3079,17 +3079,43 @@ static void STDMETHODCALLTYPE d3d11_device_context_GetHardwareProtectionState(ID
+ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Signal(ID3D11DeviceContext4 *iface,
+         ID3D11Fence *fence, UINT64 value)
+ {
+-    FIXME("iface %p, fence %p, value %I64x stub!\n", iface, fence, value);
++    struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
+ 
+-    return E_NOTIMPL;
++    TRACE("iface %p, fence %p, value %I64x.\n", iface, fence, value);
++
++    if (!fence)
++        return E_INVALIDARG;
++
++    if (context->type != D3D11_DEVICE_CONTEXT_IMMEDIATE)
++    {
++        FIXME("Signal is not implemented for deferred contexts.\n");
++        return E_NOTIMPL;
++    }
++
++    /* The fence timeline is CPU-side: flush pending GPU work first, then
++     * advance the completed value directly. */
++    wined3d_device_context_flush(context->wined3d_context);
++
++    return d3d11_fence_signal(fence, value);
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Wait(ID3D11DeviceContext4 *iface,
+         ID3D11Fence *fence, UINT64 value)
+ {
+-    FIXME("iface %p, fence %p, value %I64x stub!\n", iface, fence, value);
++    struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
+ 
+-    return E_NOTIMPL;
++    TRACE("iface %p, fence %p, value %I64x.\n", iface, fence, value);
++
++    if (!fence)
++        return E_INVALIDARG;
++
++    if (context->type != D3D11_DEVICE_CONTEXT_IMMEDIATE)
++    {
++        FIXME("Wait is not implemented for deferred contexts.\n");
++        return E_NOTIMPL;
++    }
++
++    return d3d11_fence_wait(fence, value);
+ }
+ 
+ static const struct ID3D11DeviceContext4Vtbl d3d11_device_context_vtbl =
+@@ -5412,18 +5438,26 @@ static void STDMETHODCALLTYPE d3d11_device_UnregisterDeviceRemoved(ID3D11Device5
+ static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedFence(ID3D11Device5 *iface, HANDLE handle,
+         REFIID iid, void **fence)
+ {
+-    FIXME("iface %p, handle %p, iid %s, fence %p stub!\n", iface, handle, debugstr_guid(iid), fence);
++    TRACE("iface %p, handle %p, iid %s, fence %p.\n", iface, handle, debugstr_guid(iid), fence);
+ 
+-    return E_NOTIMPL;
++    if (!fence)
++        return E_INVALIDARG;
++
++    /* The opened fence keeps its creating device; sharing state is what
++     * matters for our in-process consumers. */
++    return d3d11_fence_open_shared(handle, iid, fence);
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateFence(ID3D11Device5 *iface, UINT64 initial_value,
+         D3D11_FENCE_FLAG flags, REFIID iid, void **fence)
+ {
+-    FIXME("iface %p, initial_value %I64x, flags %d, iid %s, fence %p stub!\n", iface, initial_value,
++    TRACE("iface %p, initial_value %I64x, flags %#x, iid %s, fence %p.\n", iface, initial_value,
+             flags, debugstr_guid(iid), fence);
+ 
+-    return E_NOTIMPL;
++    if (!fence)
++        return E_INVALIDARG;
++
++    return d3d11_fence_create(iface, initial_value, flags, iid, fence);
+ }
+ 
+ static const struct ID3D11Device5Vtbl d3d11_device_vtbl =
+@@ -6235,7 +6269,7 @@ static void STDMETHODCALLTYPE d3d10_device_ResolveSubresource(ID3D10Device1 *ifa
      wined3d_format = wined3dformat_from_dxgi_format(format);
      wined3d_device_context_resolve_sub_resource(device->immediate_context.wined3d_context,
              wined3d_dst_resource, dst_subresource_idx,
@@ -570,10 +649,10 @@ index 975481d4..4bbfa2a8 100644
  
  static HRESULT STDMETHODCALLTYPE dxgi_adapter_get_adapter_info(IWineDXGIAdapter *iface,
 diff --git a/dlls/dxgi/device.c b/dlls/dxgi/device.c
-index dec94250..372b6094 100644
+index 46d252f2..a1852f06 100644
 --- a/dlls/dxgi/device.c
 +++ b/dlls/dxgi/device.c
-@@ -468,6 +468,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_swapchain_factory_create_swapchain(IWineDX
+@@ -469,6 +469,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_swapchain_factory_create_swapchain(IWineDX
          return hr;
      }
  
@@ -583,7 +662,7 @@ index dec94250..372b6094 100644
  
      *swapchain = (IDXGISwapChain1 *)&object->IDXGISwapChain4_iface;
 diff --git a/dlls/dxgi/dxgi_private.h b/dlls/dxgi/dxgi_private.h
-index 164bc107..0ca474bc 100644
+index 483aac4d..3d0820ce 100644
 --- a/dlls/dxgi/dxgi_private.h
 +++ b/dlls/dxgi/dxgi_private.h
 @@ -169,6 +169,16 @@ HRESULT dxgi_adapter_create(struct dxgi_factory *factory, UINT ordinal,
@@ -1395,10 +1474,10 @@ index e828ed0d..6f911266 100644
  
  static HRESULT STDMETHODCALLTYPE dxgi_output_TakeOwnership(IDXGIOutput6 *iface, IUnknown *device, BOOL exclusive)
 diff --git a/dlls/dxgi/resource.c b/dlls/dxgi/resource.c
-index 0a2fa097..7cd7439a 100644
+index 67921de0..e3c33008 100644
 --- a/dlls/dxgi/resource.c
 +++ b/dlls/dxgi/resource.c
-@@ -220,6 +220,96 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_GetDC(IDXGISurface1 *iface, BOOL d
+@@ -234,6 +234,96 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_GetDC(IDXGISurface2 *iface, BOOL d
      return hr;
  }
  
@@ -1492,10 +1571,10 @@ index 0a2fa097..7cd7439a 100644
 +                width, height, data.blit_count);
 +}
 +
- static HRESULT STDMETHODCALLTYPE dxgi_surface_ReleaseDC(IDXGISurface1 *iface, RECT *dirty_rect)
+ static HRESULT STDMETHODCALLTYPE dxgi_surface_ReleaseDC(IDXGISurface2 *iface, RECT *dirty_rect)
  {
-     struct dxgi_resource *resource = impl_from_IDXGISurface1(iface);
-@@ -227,7 +317,34 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_ReleaseDC(IDXGISurface1 *iface, RE
+     struct dxgi_resource *resource = impl_from_IDXGISurface2(iface);
+@@ -241,7 +331,35 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_ReleaseDC(IDXGISurface2 *iface, RE
  
      TRACE("iface %p, rect %s\n", iface, wine_dbgstr_rect(dirty_rect));
  
@@ -1515,7 +1594,8 @@ index 0a2fa097..7cd7439a 100644
 +
 +        if (!swapchain)
 +        {
-+            wined3d_texture_get_sub_resource_desc(texture, 0, &desc);
++            wined3d_resource_get_sub_resource_desc(resource->wined3d_resource,
++                    resource->subresource_idx, &desc);
 +            wined3d_mutex_unlock();
 +
 +            if (desc.width > 1 && desc.height > 1)
@@ -1532,7 +1612,7 @@ index 0a2fa097..7cd7439a 100644
  
      wined3d_mutex_lock();
 diff --git a/dlls/dxgi/swapchain.c b/dlls/dxgi/swapchain.c
-index 4797fcec..a5445c86 100644
+index 5c49c7f2..474176f0 100644
 --- a/dlls/dxgi/swapchain.c
 +++ b/dlls/dxgi/swapchain.c
 @@ -234,11 +234,55 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
@@ -1674,64 +1754,3 @@ index 4797fcec..a5445c86 100644
  }
  
  static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetMatrixTransform(IDXGISwapChain4 *iface,
-diff --git a/include/d3d11.idl b/include/d3d11.idl
-index 9a246fa7..d13a7ad8 100644
---- a/include/d3d11.idl
-+++ b/include/d3d11.idl
-@@ -855,23 +855,34 @@ typedef enum D3D11_FILTER_TYPE
-     D3D11_FILTER_TYPE_LINEAR = 1
- } D3D11_FILTER_TYPE;
- 
-+typedef enum D3D11_FILTER_REDUCTION_TYPE
-+{
-+    D3D11_FILTER_REDUCTION_TYPE_STANDARD   = 0x0,
-+    D3D11_FILTER_REDUCTION_TYPE_COMPARISON = 0x1,
-+    D3D11_FILTER_REDUCTION_TYPE_MINIMUM    = 0x2,
-+    D3D11_FILTER_REDUCTION_TYPE_MAXIMUM    = 0x3,
-+} D3D11_FILTER_REDUCTION_TYPE;
-+
-+const UINT D3D11_FILTER_REDUCTION_TYPE_SHIFT = 7;
- const UINT D3D11_MIN_FILTER_SHIFT = 4;
- const UINT D3D11_MAG_FILTER_SHIFT = 2;
- const UINT D3D11_MIP_FILTER_SHIFT = 0;
--const UINT D3D11_FILTER_TYPE_MASK          = 0x00000003;
--const UINT D3D11_COMPARISON_FILTERING_BIT  = 0x00000080;
--const UINT D3D11_ANISOTROPIC_FILTERING_BIT = 0x00000040;
- 
--cpp_quote("#define D3D11_ENCODE_BASIC_FILTER(min, mag, mip, bComparison) \\")
--cpp_quote("    ((D3D11_FILTER)(((bComparison) ? D3D11_COMPARISON_FILTERING_BIT : 0 ) | \\")
--cpp_quote("                    (((min)&D3D11_FILTER_TYPE_MASK) << D3D11_MIN_FILTER_SHIFT) | \\")
-+const UINT D3D11_FILTER_REDUCTION_TYPE_MASK = 0x00000003;
-+const UINT D3D11_FILTER_TYPE_MASK           = 0x00000003;
-+const UINT D3D11_COMPARISON_FILTERING_BIT   = 0x00000080;
-+const UINT D3D11_ANISOTROPIC_FILTERING_BIT  = 0x00000040;
-+
-+cpp_quote("#define D3D11_ENCODE_BASIC_FILTER(min, mag, mip, reduction_mode) \\")
-+cpp_quote("    ((D3D11_FILTER)((((min)&D3D11_FILTER_TYPE_MASK) << D3D11_MIN_FILTER_SHIFT) | \\")
- cpp_quote("                    (((mag)&D3D11_FILTER_TYPE_MASK) << D3D11_MAG_FILTER_SHIFT) | \\")
--cpp_quote("                    (((mip)&D3D11_FILTER_TYPE_MASK) << D3D11_MIP_FILTER_SHIFT)))")
-+cpp_quote("                    (((mip)&D3D11_FILTER_TYPE_MASK) << D3D11_MIP_FILTER_SHIFT) | \\")
-+cpp_quote("                    (((reduction_mode)&D3D11_FILTER_REDUCTION_TYPE_MASK) << D3D11_FILTER_REDUCTION_TYPE_SHIFT)))")
- 
--cpp_quote("#define D3D11_ENCODE_ANISOTROPIC_FILTER(bComparison) \\")
-+cpp_quote("#define D3D11_ENCODE_ANISOTROPIC_FILTER(reduction_mode) \\")
- cpp_quote("    ((D3D11_FILTER)(D3D11_ANISOTROPIC_FILTERING_BIT | \\" )
- cpp_quote("                    D3D11_ENCODE_BASIC_FILTER(D3D11_FILTER_TYPE_LINEAR,D3D11_FILTER_TYPE_LINEAR, \\" )
--cpp_quote("                                              D3D11_FILTER_TYPE_LINEAR,bComparison)))" )
-+cpp_quote("                                              D3D11_FILTER_TYPE_LINEAR,reduction_mode)))" )
- 
- cpp_quote("#define D3D11_DECODE_MIN_FILTER(d3d11Filter) \\")
- cpp_quote("    ((D3D11_FILTER_TYPE)(((d3d11Filter) >> D3D11_MIN_FILTER_SHIFT) & D3D11_FILTER_TYPE_MASK))")
-@@ -882,7 +893,11 @@ cpp_quote("    ((D3D11_FILTER_TYPE)(((d3d11Filter) >> D3D11_MAG_FILTER_SHIFT) &
- cpp_quote("#define D3D11_DECODE_MIP_FILTER(d3d11Filter) \\")
- cpp_quote("    ((D3D11_FILTER_TYPE)(((d3d11Filter) >> D3D11_MIP_FILTER_SHIFT) & D3D11_FILTER_TYPE_MASK))")
- 
--cpp_quote("#define D3D11_DECODE_IS_COMPARISON_FILTER(d3d11Filter) ((d3d11Filter) & D3D11_COMPARISON_FILTERING_BIT)")
-+cpp_quote("#define D3D11_DECODE_FILTER_REDUCTION(filter) \\")
-+cpp_quote("    ((D3D11_FILTER_REDUCTION_TYPE)(((filter) >> D3D11_FILTER_REDUCTION_TYPE_SHIFT) & D3D11_FILTER_REDUCTION_TYPE_MASK))")
-+
-+cpp_quote("#define D3D11_DECODE_IS_COMPARISON_FILTER(filter) \\")
-+cpp_quote("    (D3D11_DECODE_FILTER_REDUCTION(filter) == D3D11_FILTER_REDUCTION_TYPE_COMPARISON)")
- 
- cpp_quote("#define D3D11_DECODE_IS_ANISOTROPIC_FILTER(d3d11Filter) \\")
- cpp_quote("    (((d3d11Filter) & D3D11_ANISOTROPIC_FILTERING_BIT ) \\" )

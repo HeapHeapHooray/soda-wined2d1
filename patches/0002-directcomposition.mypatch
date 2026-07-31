@@ -4810,7 +4810,7 @@ index d0eb9209..0a309755 100644
 +    return TRUE;
 +}
 diff --git a/include/dcomp.idl b/include/dcomp.idl
-index d5a9c362..1279d738 100644
+index 40aa6aa1..c9d20a87 100644
 --- a/include/dcomp.idl
 +++ b/include/dcomp.idl
 @@ -18,6 +18,7 @@
@@ -4821,7 +4821,7 @@ index d5a9c362..1279d738 100644
  import "dcommon.idl";
  import "dcompanimation.idl";
  import "dcomptypes.idl";
-@@ -425,6 +426,320 @@ interface IDCompositionDevice2 : IUnknown
+@@ -427,6 +428,320 @@ interface IDCompositionDevice2 : IUnknown
      HRESULT CreateAnimation([out] IDCompositionAnimation **animation);
  }
  
