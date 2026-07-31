@@ -1,4 +1,4 @@
-# soda-wined2d1 — Soda (Bottles) Wine runner with Direct2D 1.3 + DirectComposition patches
+# soda-d2d1 — Soda (Bottles) Wine runner with Direct2D 1.3 + DirectComposition patches
 
 A Bottles **Soda**-flavored Wine runner (same base as upstream **Soda 11.0-2**) with
 [giang17](https://github.com/giang17/wine)'s `d2d1-dcomp-11.0` patch series applied.
